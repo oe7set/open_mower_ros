@@ -269,7 +269,7 @@ xbot_rpc::RpcProvider rpc_provider("xbot_monitoring", {{
             std::string updated = xbot_monitoring::config_io::write_config_sh(original, changes);
             xbot_monitoring::config_io::write_text_file_atomic(path, updated);
             ROS_INFO_STREAM("meta.config.set wrote " << changes.size() << " change(s) to " << path);
-            return json{{"updated", changes.size()}};
+            return json::object({{"updated", changes.size()}});
         } catch (const std::exception& e) {
             throw xbot_rpc::RpcException(xbot_rpc::RpcError::ERROR_INTERNAL,
                                           std::string("Failed to write config: ") + e.what());
