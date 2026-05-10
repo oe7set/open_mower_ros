@@ -13,6 +13,10 @@
 
   <buildtool_depend>catkin</buildtool_depend>
 
+  <build_depend>std_msgs</build_depend>
+  <build_depend>xbot_msgs</build_depend>
+  <build_depend>xbot_rpc</build_depend>
+
   <exec_depend>rospy</exec_depend>
   <exec_depend>std_msgs</exec_depend>
   <exec_depend>xbot_msgs</exec_depend>
