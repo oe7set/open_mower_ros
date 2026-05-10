@@ -2,9 +2,14 @@
 // Created by Clemens Elflein on 22.11.22.
 // Copyright (c) 2022 Clemens Elflein. All rights reserved.
 //
+#include <deque>
 #include <filesystem>
 
+#include "config_io.h"
 #include "ros/ros.h"
+#include <ros/package.h>
+#include <ros/this_node.h>
+#include <dynamic_reconfigure/Reconfigure.h>
 #include <memory>
 #include <boost/regex.hpp>
 #include "xbot_msgs/SensorInfo.h"
@@ -15,7 +20,9 @@
 #include <nlohmann/json.hpp>
 #include <vector>
 #include "geometry_msgs/Twist.h"
+#include "nav_msgs/Path.h"
 #include "std_msgs/String.h"
+#include "visualization_msgs/MarkerArray.h"
 #include "xbot_msgs/RegisterActionsSrv.h"
 #include "xbot_msgs/ActionInfo.h"
 #include "xbot_msgs/MapOverlay.h"
@@ -143,6 +150,53 @@ std::mutex map_overlay_mutex;
 bool has_map = false;
 bool has_map_overlay = false;
 
+// Resolve the path to mower_config.sh. Allow override via the ~mower_config_path
+// param so packagers and tests can point us at a sandboxed copy. Default is the
+// path that the OpenMowerOS images bake into the home directory of the ROS
+// container.
+static std::string get_mower_config_path() {
+    std::string path;
+    ros::param::param<std::string>("~mower_config_path", path, std::string(getenv("HOME") ? getenv("HOME") : "/root") + "/mower_config.sh");
+    return path;
+}
+
+// Resolve the path to mower_config.schema.json. The launch file is expected
+// to set ~mower_config_schema_path to the absolute path inside the deployed
+// container; we fall back to a path next to the open_mower package for dev
+// builds.
+static std::string get_mower_config_schema_path() {
+    std::string path;
+    if (ros::param::get("~mower_config_schema_path", path) && !path.empty()) {
+        return path;
+    }
+    std::string pkg = ros::package::getPath("open_mower");
+    if (!pkg.empty()) {
+        // open_mower/config/mower_config.schema.json (in source layouts the
+        // file lives at the repo's top-level config/, in install layouts
+        // share/open_mower/config/).
+        std::string candidate = pkg + "/config/mower_config.schema.json";
+        if (std::filesystem::exists(candidate)) return candidate;
+    }
+    // As a last resort, look at the repo top-level path. This works for the
+    // dev workspace where source is laid out as expected.
+    return "/root/open_mower_ros/config/mower_config.schema.json";
+}
+
+// Cache of the parsed schema; loaded lazily to avoid I/O on every RPC call.
+static std::mutex schema_cache_mutex;
+static json schema_cache;
+static bool schema_cache_loaded = false;
+
+static json& load_schema_cached() {
+    std::lock_guard<std::mutex> lk(schema_cache_mutex);
+    if (!schema_cache_loaded) {
+        std::string raw = xbot_monitoring::config_io::read_text_file(get_mower_config_schema_path());
+        schema_cache = json::parse(raw);
+        schema_cache_loaded = true;
+    }
+    return schema_cache;
+}
+
 xbot_rpc::RpcProvider rpc_provider("xbot_monitoring", {{
     RPC_METHOD("rpc.ping", {
         return "pong";
@@ -157,6 +211,122 @@ xbot_rpc::RpcProvider rpc_provider("xbot_monitoring", {{
         }
         std::sort(methods.begin(), methods.end());
         return methods;
+    }),
+    RPC_METHOD("meta.rpc.ping", {
+        return "pong";
+    }),
+    RPC_METHOD("meta.config.schema", {
+        // Frontend expects the schema as a JSON string (it parses it itself
+        // because @json-schema-tools/dereferencer wants raw input).
+        try {
+            return load_schema_cached().dump();
+        } catch (const std::exception& e) {
+            throw xbot_rpc::RpcException(xbot_rpc::RpcError::ERROR_INTERNAL,
+                                          std::string("Failed to load schema: ") + e.what());
+        }
+    }),
+    RPC_METHOD("meta.config.defaults", {
+        // Frontend expects {filename: yaml_content}. We synthesise a single
+        // defaults.yaml from the schema; boards/ and mowers/ stubs are empty.
+        try {
+            return xbot_monitoring::config_io::defaults_yaml_from_schema(load_schema_cached());
+        } catch (const std::exception& e) {
+            throw xbot_rpc::RpcException(xbot_rpc::RpcError::ERROR_INTERNAL,
+                                          std::string("Failed to build defaults: ") + e.what());
+        }
+    }),
+    RPC_METHOD("meta.config.get", {
+        try {
+            std::string raw = xbot_monitoring::config_io::read_text_file(get_mower_config_path());
+            return xbot_monitoring::config_io::parse_config_sh(raw);
+        } catch (const std::exception& e) {
+            throw xbot_rpc::RpcException(xbot_rpc::RpcError::ERROR_INTERNAL,
+                                          std::string("Failed to read config: ") + e.what());
+        }
+    }),
+    RPC_METHOD("meta.config.set", {
+        // Accept either {changes: {...}} (named) or [{...}] (positional).
+        json changes;
+        if (params.is_object() && params.contains("changes") && params["changes"].is_object()) {
+            changes = params["changes"];
+        } else if (params.is_array() && params.size() == 1 && params[0].is_object()) {
+            changes = params[0];
+        } else if (params.is_object()) {
+            changes = params;
+        } else {
+            throw xbot_rpc::RpcException(xbot_rpc::RpcError::ERROR_INVALID_PARAMS,
+                                          "Expected an object of {key: value} changes");
+        }
+        try {
+            std::string path = get_mower_config_path();
+            std::string original;
+            try {
+                original = xbot_monitoring::config_io::read_text_file(path);
+            } catch (...) {
+                // First-time write — file may not exist yet.
+                original = "# Generated by xbot_monitoring meta.config.set\n";
+            }
+            std::string updated = xbot_monitoring::config_io::write_config_sh(original, changes);
+            xbot_monitoring::config_io::write_text_file_atomic(path, updated);
+            ROS_INFO_STREAM("meta.config.set wrote " << changes.size() << " change(s) to " << path);
+            return json{{"updated", changes.size()}};
+        } catch (const std::exception& e) {
+            throw xbot_rpc::RpcException(xbot_rpc::RpcError::ERROR_INTERNAL,
+                                          std::string("Failed to write config: ") + e.what());
+        }
+    }),
+    RPC_METHOD("params.set", {
+        // params = {name: string, value: <any>}. We always ros::param::set;
+        // additionally trigger dynamic_reconfigure if the parameter name is
+        // <node>/<key> and that node exposes /set_parameters. Unknown
+        // composites silently fall back to a static set.
+        if (!params.is_object() || !params.contains("name") || !params["name"].is_string()) {
+            throw xbot_rpc::RpcException(xbot_rpc::RpcError::ERROR_INVALID_PARAMS, "Missing name");
+        }
+        if (!params.contains("value")) {
+            throw xbot_rpc::RpcException(xbot_rpc::RpcError::ERROR_INVALID_PARAMS, "Missing value");
+        }
+        const std::string name = params["name"];
+        const auto& v = params["value"];
+        if (v.is_boolean()) ros::param::set(name, v.get<bool>());
+        else if (v.is_number_integer()) ros::param::set(name, v.get<int>());
+        else if (v.is_number_float()) ros::param::set(name, v.get<double>());
+        else if (v.is_string()) ros::param::set(name, v.get<std::string>());
+        else throw xbot_rpc::RpcException(xbot_rpc::RpcError::ERROR_INVALID_PARAMS, "Unsupported value type");
+
+        // Best-effort dynamic_reconfigure. Owner node is derived from the
+        // first path segment (e.g. /mower_logic/foo → /mower_logic). If the
+        // service isn't there we just return success — the static set is
+        // already committed.
+        size_t slash1 = name.find('/', name[0] == '/' ? 1 : 0);
+        size_t slash2 = name.find('/', slash1 + 1);
+        if (slash1 != std::string::npos && slash2 != std::string::npos) {
+            std::string node_ns = name.substr(0, slash2);
+            std::string key = name.substr(slash2 + 1);
+            std::string svc = node_ns + "/set_parameters";
+            if (ros::service::exists(svc, false)) {
+                dynamic_reconfigure::Reconfigure srv;
+                if (v.is_boolean()) {
+                    dynamic_reconfigure::BoolParameter p;
+                    p.name = key; p.value = v.get<bool>();
+                    srv.request.config.bools.push_back(p);
+                } else if (v.is_number_integer()) {
+                    dynamic_reconfigure::IntParameter p;
+                    p.name = key; p.value = v.get<int>();
+                    srv.request.config.ints.push_back(p);
+                } else if (v.is_number_float()) {
+                    dynamic_reconfigure::DoubleParameter p;
+                    p.name = key; p.value = v.get<double>();
+                    srv.request.config.doubles.push_back(p);
+                } else if (v.is_string()) {
+                    dynamic_reconfigure::StrParameter p;
+                    p.name = key; p.value = v.get<std::string>();
+                    srv.request.config.strs.push_back(p);
+                }
+                ros::service::call(svc, srv);
+            }
+        }
+        return nullptr;
     }),
 }});
 
@@ -572,6 +742,72 @@ void map_callback(const std_msgs::String::ConstPtr &msg) {
 }
 
 
+// Re-publishes nav_msgs::Path to <prefix>planned_path/json as [{x,y}, ...].
+// Frontend uses this for the orange "this is where the mower is going next"
+// overlay; downsampled in the source via the planner already.
+void planned_path_callback(const nav_msgs::Path::ConstPtr &msg) {
+    json points = json::array();
+    points.get_ptr<json::array_t*>()->reserve(msg->poses.size());
+    for (const auto &pose : msg->poses) {
+        json p;
+        p["x"] = pose.pose.position.x;
+        p["y"] = pose.pose.position.y;
+        points.push_back(std::move(p));
+    }
+    try_publish("planned_path/json", points.dump(), true);
+}
+
+// Re-publishes the slic3r MarkerArray as [{points: [{x,y},...]}, ...].
+// Each Marker's points become a separate stripe — the frontend renders them
+// as cyan polylines so the user can see the planned mowing pattern.
+void coverage_path_callback(const visualization_msgs::MarkerArray::ConstPtr &msg) {
+    json stripes = json::array();
+    for (const auto &marker : msg->markers) {
+        if (marker.points.empty()) continue;
+        json stripe;
+        json pts = json::array();
+        for (const auto &pt : marker.points) {
+            json p;
+            p["x"] = pt.x;
+            p["y"] = pt.y;
+            pts.push_back(std::move(p));
+        }
+        stripe["points"] = std::move(pts);
+        stripes.push_back(std::move(stripe));
+    }
+    try_publish("coverage_path/json", stripes.dump(), true);
+}
+
+// Rolling history of mowed paths. We hard-cap the buffer so a long mowing
+// session can't blow up MQTT payload size; the cap is the latest N points
+// across all received Paths concatenated (older points drop off the front).
+constexpr size_t MOWING_TRAIL_CAPACITY = 5000;
+std::deque<std::pair<double, double>> mowing_trail_buffer;
+std::mutex mowing_trail_mutex;
+
+void mowing_trail_callback(const nav_msgs::Path::ConstPtr &msg) {
+    {
+        std::lock_guard<std::mutex> lk(mowing_trail_mutex);
+        for (const auto &pose : msg->poses) {
+            mowing_trail_buffer.emplace_back(pose.pose.position.x, pose.pose.position.y);
+            if (mowing_trail_buffer.size() > MOWING_TRAIL_CAPACITY) {
+                mowing_trail_buffer.pop_front();
+            }
+        }
+    }
+    json points = json::array();
+    {
+        std::lock_guard<std::mutex> lk(mowing_trail_mutex);
+        for (const auto &[x, y] : mowing_trail_buffer) {
+            json p;
+            p["x"] = x;
+            p["y"] = y;
+            points.push_back(std::move(p));
+        }
+    }
+    try_publish("mowing_trail/json", points.dump(), true);
+}
+
 void map_overlay_callback(const xbot_msgs::MapOverlay::ConstPtr &msg) {
     // Build a JSON and publish it
 
@@ -652,10 +888,6 @@ void rpc_request_callback(const std::string &payload) {
 
     // Check if the method is registered
     const std::string method = req["method"];
-    if (method.compare(0, 5, "meta.") == 0) {
-      // Silently ignore methods that are handled by the meta service.
-      return;
-    }
     bool is_registered = false;
     {
         std::lock_guard<std::mutex> lk(registered_methods_mutex);
@@ -739,6 +971,15 @@ int main(int argc, char **argv) {
     ros::Subscriber robotStateSubscriber = n->subscribe("xbot_monitoring/robot_state", 10, robot_state_callback);
     ros::Subscriber mapSubscriber = n->subscribe("mower_map_service/json_map", 10, map_callback);
     ros::Subscriber mapOverlaySubscriber = n->subscribe("xbot_monitoring/map_overlay", 10, map_overlay_callback);
+    // Path-layer bridges. Topics are advertised in their respective publishers
+    // (ftc_local_planner, slic3r_coverage_planner, mower_logic). Frontend
+    // subscribes to <prefix>planned_path/json etc.
+    ros::Subscriber plannedPathSubscriber = n->subscribe(
+        "/move_base_flex/FTCPlanner/global_plan", 1, planned_path_callback);
+    ros::Subscriber coveragePathSubscriber = n->subscribe(
+        "/slic3r_coverage_planner/path_marker_array", 1, coverage_path_callback);
+    ros::Subscriber mowingTrailSubscriber = n->subscribe(
+        "/mower_logic/mowing_path", 10, mowing_trail_callback);
 
     cmd_vel_pub = n->advertise<geometry_msgs::Twist>("xbot_monitoring/remote_cmd_vel", 1);
     action_pub = n->advertise<std_msgs::String>("xbot/action", 1);

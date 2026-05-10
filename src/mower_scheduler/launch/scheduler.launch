@@ -1,0 +1,9 @@
+<launch>
+  <!-- Path to the schedule store. Override per deployment if needed. -->
+  <arg name="schedules_path" default="$(env HOME)/.openmower/schedules.json"/>
+
+  <node pkg="mower_scheduler" type="scheduler.py" name="mower_scheduler"
+        output="screen" respawn="true" respawn_delay="10">
+    <param name="schedules_path" value="$(arg schedules_path)"/>
+  </node>
+</launch>

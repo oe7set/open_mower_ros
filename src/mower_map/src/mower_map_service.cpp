@@ -199,6 +199,29 @@ xbot_rpc::RpcProvider rpc_provider("mower_map_service", {{
     buildMap();
     return "Successfully stored map (" + std::to_string(map_data.areas.size()) + " areas)";
   }),
+  RPC_METHOD("map.start_in_area", {
+    // Frontend passes the mowing-area index (i.e. position in the type=="mow"
+    // filtered list, matching what robot_state.current_area reports). We
+    // validate the index and stash it in a ROS param; mower_logic's
+    // IdleBehavior reads and clears it before transitioning to MOWING.
+    int idx = -1;
+    if (params.is_object() && params.contains("area_index")) {
+      idx = params["area_index"];
+    } else if (params.is_array() && !params.empty()) {
+      idx = params[0];
+    } else {
+      throw xbot_rpc::RpcException(xbot_rpc::RpcError::ERROR_INVALID_PARAMS, "Missing area_index");
+    }
+    const auto mow_areas = map_data.getMowingAreas();
+    if (idx < 0 || idx >= static_cast<int>(mow_areas.size())) {
+      throw xbot_rpc::RpcException(xbot_rpc::RpcError::ERROR_INVALID_PARAMS,
+                                    "area_index " + std::to_string(idx) + " out of range (have " +
+                                        std::to_string(mow_areas.size()) + " mowing areas)");
+    }
+    ros::param::set("/mower_logic/next_area_index", idx);
+    ROS_INFO_STREAM("map.start_in_area set /mower_logic/next_area_index=" << idx);
+    return nullptr;
+  }),
 }});
 // clang-format on
 
