@@ -22,6 +22,11 @@
     <node pkg="xbot_monitoring" type="xbot_monitoring" name="xbot_monitoring" output="screen" respawn="true"
           respawn_delay="10">
         <remap from="/xbot_monitoring/remote_cmd_vel" to="/joy_vel"/>
+        <!-- Schema and live config paths used by the meta.config.* RPC methods.
+             The schema ships with the open_mower package; the .sh file lives in
+             the user's home (the OpenMowerOS image places it there). -->
+        <param name="mower_config_schema_path" value="$(find open_mower)/../../config/mower_config.schema.json"/>
+        <param name="mower_config_path" value="$(optenv HOME /root)/mower_config.sh"/>
     </node>
 
     <node pkg="xbot_monitoring" type="heatmap_generator" name="heatmap_generator" output="screen" respawn="true"
@@ -33,6 +38,8 @@
     </node>
 
     <node pkg="mower_logic" type="monitoring" name="monitoring" output="screen" respawn="true" respawn_delay="10"/>
+
+    <include file="$(find mower_scheduler)/launch/scheduler.launch"/>
 
     <include file="$(find open_mower)/launch/include/_params.launch"/>
 </launch>

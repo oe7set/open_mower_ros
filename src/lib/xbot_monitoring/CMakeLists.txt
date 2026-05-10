@@ -8,12 +8,16 @@ add_compile_options(-std=c++17)
 find_package(catkin REQUIRED COMPONENTS
         xbot_msgs
         roscpp
+        roslib
         geometry_msgs
+        nav_msgs
         std_msgs
+        visualization_msgs
         grid_map_core
         grid_map_ros
         grid_map_msgs
         xbot_rpc
+        dynamic_reconfigure
         )
 
 
@@ -47,7 +51,8 @@ include_directories(
 )
 
 add_executable(xbot_monitoring
-        src/xbot_monitoring.cpp)
+        src/xbot_monitoring.cpp
+        src/config_io.cpp)
 
 
 add_dependencies(xbot_monitoring ${catkin_EXPORTED_TARGETS} ${${PROJECT_NAME}_EXPORTED_TARGETS})
@@ -65,3 +70,12 @@ add_executable(heatmap_generator
 
 add_dependencies(heatmap_generator ${catkin_EXPORTED_TARGETS} ${${PROJECT_NAME}_EXPORTED_TARGETS})
 target_link_libraries(heatmap_generator ${catkin_LIBRARIES})
+
+# Optional standalone test for config_io. Build with:
+#   catkin build xbot_monitoring --cmake-args -DBUILD_CONFIG_IO_TEST=ON
+# Run from the binary directory and pass the schema path as argv[1].
+option(BUILD_CONFIG_IO_TEST "Build the standalone config_io smoke test" OFF)
+if(BUILD_CONFIG_IO_TEST)
+    add_executable(config_io_test src/config_io.cpp src/config_io_test.cpp)
+    target_link_libraries(config_io_test nlohmann_json::nlohmann_json)
+endif()

@@ -94,6 +94,20 @@ void MowingBehavior::enter() {
   skip_path = false;
   paused = aborted = false;
 
+  // map.start_in_area RPC stashes the requested mowing-area index here. Pick
+  // it up exactly once on entry so a "Start in this area" click jumps to the
+  // right area; subsequent transitions (resume after pause, etc.) keep the
+  // existing currentMowingArea progression.
+  int requested_area = -1;
+  if (ros::param::getCached("/mower_logic/next_area_index", requested_area) && requested_area >= 0) {
+    ROS_INFO_STREAM("MowingBehavior: starting in area " << requested_area << " (from map.start_in_area)");
+    currentMowingArea = requested_area;
+    currentMowingPaths.clear();
+    currentMowingPath = 0;
+    currentMowingPathIndex = 0;
+    ros::param::set("/mower_logic/next_area_index", -1);
+  }
+
   for (auto& a : actions) {
     a.enabled = true;
   }
