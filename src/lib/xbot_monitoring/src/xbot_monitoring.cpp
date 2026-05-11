@@ -741,7 +741,7 @@ void setupMqttClient() {
     }
 }
 
-void try_publish(std::string topic, std::string data, bool retain = false) {
+void try_publish(std::string topic, std::string data, bool retain) {
     try {
         if (retain) {
             // QOS 1 so that the data actually arrives at the client at least once.
