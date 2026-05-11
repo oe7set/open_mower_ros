@@ -70,7 +70,9 @@ WORKDIR /opt/open_mower_ros
 
 RUN bash -c "source /opt/ros/$ROS_DISTRO/setup.bash && cd /opt/open_mower_ros/src && catkin_init_workspace && cd .. && source /opt/prebuilt/slic3r_coverage_planner/setup.bash && catkin_make -DCATKIN_BLACKLIST_PACKAGES=slic3r_coverage_planner"
 
-RUN echo "export OM_SOFTWARE_VERSION=$(git describe --tags || git describe --always || echo \"v0.0.0\")" > version_info.env
+RUN OM_VER="$(git describe --tags 2>/dev/null || git describe --always 2>/dev/null || echo v0.0.0)" && \
+    echo "export OM_SOFTWARE_VERSION=$OM_VER" > version_info.env && \
+    echo "$OM_VER" > /opt/open_mower_ros/.version_string
 
 RUN mkdir -p /config
 COPY ./docker/assets/rosconsole.config /config/rosconsole.config

@@ -5,8 +5,11 @@ set -e
 source "/opt/ros/$ROS_DISTRO/setup.bash"
 source /opt/open_mower_ros/devel/setup.bash
 
-# setup om environment
+# setup om environment - source version env, then re-export from the version
+# string file as a robust fallback (some shell-launch chains drop env vars from
+# `source`d files; reading the plain string into an explicit export survives).
 source /opt/open_mower_ros/version_info.env
+export OM_SOFTWARE_VERSION="${OM_SOFTWARE_VERSION:-$(cat /opt/open_mower_ros/.version_string 2>/dev/null || echo unknown)}"
 
 # OSv2 debugging get controlled via env var DEBUG and has the ROSCONSOLE_CONFIG_FILE embedded
 shopt -s nocasematch
