@@ -2,11 +2,16 @@
 // Created by Clemens Elflein on 22.11.22.
 // Copyright (c) 2022 Clemens Elflein. All rights reserved.
 //
+#include <chrono>
+#include <csignal>
 #include <deque>
 #include <filesystem>
+#include <thread>
+#include <unordered_set>
 
 #include "config_io.h"
 #include "ros/ros.h"
+#include "rosgraph_msgs/Log.h"
 #include <ros/package.h>
 #include <ros/this_node.h>
 #include <dynamic_reconfigure/Reconfigure.h>
@@ -197,6 +202,59 @@ static json& load_schema_cached() {
     return schema_cache;
 }
 
+// Ring buffer for /rosout_agg, populated by rosout_callback. logs.tail RPC
+// reads from here. Capacity is generous (~5000) so that a 1000-line query
+// always finds enough history without keeping the journal forever.
+struct LogEntry {
+    double ts;            // header.stamp seconds (epoch).
+    std::string level;    // "debug" | "info" | "warn" | "error" | "fatal"
+    std::string source;   // node name (rosgraph_msgs/Log::name)
+    std::string msg;
+};
+constexpr size_t LOG_BUFFER_CAPACITY = 5000;
+std::deque<LogEntry> log_buffer;
+std::mutex log_buffer_mutex;
+
+static std::string rosout_level_to_string(int8_t level) {
+    // rosgraph_msgs/Log levels are bit flags: 1=DEBUG, 2=INFO, 4=WARN, 8=ERROR, 16=FATAL.
+    switch (level) {
+        case rosgraph_msgs::Log::DEBUG: return "debug";
+        case rosgraph_msgs::Log::INFO:  return "info";
+        case rosgraph_msgs::Log::WARN:  return "warn";
+        case rosgraph_msgs::Log::ERROR: return "error";
+        case rosgraph_msgs::Log::FATAL: return "fatal";
+        default: return "info";
+    }
+}
+
+void rosout_callback(const rosgraph_msgs::Log::ConstPtr &msg) {
+    LogEntry e;
+    e.ts = msg->header.stamp.toSec();
+    e.level = rosout_level_to_string(msg->level);
+    e.source = msg->name;
+    e.msg = msg->msg;
+    std::lock_guard<std::mutex> lk(log_buffer_mutex);
+    log_buffer.push_back(std::move(e));
+    if (log_buffer.size() > LOG_BUFFER_CAPACITY) {
+        log_buffer.pop_front();
+    }
+}
+
+// Whitelist: keys are accepted RPC source filters, values are substring
+// patterns matched against rosgraph_msgs/Log::name (with leading slash).
+// "all" disables filtering.
+static const std::unordered_set<std::string> kLogsTailSources = {
+    "all", "mower_logic", "xbot_monitoring", "mower_scheduler",
+    "move_base_flex", "map_service", "slic3r_coverage_planner"
+};
+
+// Allow-list for system.restart_service. Restarting xbot_monitoring restarts
+// the whole container (PID 1), which restarts roslaunch and therefore every
+// node — cleaner than fighting systemd from inside a non-privileged container.
+static const std::unordered_set<std::string> kRestartServices = {
+    "openmower", "mower_logic", "xbot_monitoring", "move_base_flex"
+};
+
 xbot_rpc::RpcProvider rpc_provider("xbot_monitoring", {{
     RPC_METHOD("rpc.ping", {
         return "pong";
@@ -327,6 +385,78 @@ xbot_rpc::RpcProvider rpc_provider("xbot_monitoring", {{
             }
         }
         return nullptr;
+    }),
+    RPC_METHOD("logs.tail", {
+        // Params: { source?: string, lines?: number }. Source is whitelisted
+        // against kLogsTailSources; lines clamped to [50, 5000], default 200.
+        std::string source = "all";
+        int lines = 200;
+        if (params.is_object()) {
+            if (params.contains("source") && params["source"].is_string()) {
+                source = params["source"].get<std::string>();
+            }
+            if (params.contains("lines") && params["lines"].is_number_integer()) {
+                lines = params["lines"].get<int>();
+            }
+        }
+        if (kLogsTailSources.find(source) == kLogsTailSources.end()) {
+            throw xbot_rpc::RpcException(xbot_rpc::RpcError::ERROR_INVALID_PARAMS,
+                                          "Unknown source; allowed: all, mower_logic, "
+                                          "xbot_monitoring, mower_scheduler, "
+                                          "move_base_flex, map_service, slic3r_coverage_planner");
+        }
+        if (lines < 50) lines = 50;
+        if (lines > 5000) lines = 5000;
+
+        json entries = json::array();
+        std::lock_guard<std::mutex> lk(log_buffer_mutex);
+        // Walk backwards collecting up to `lines` matching entries, then reverse.
+        std::vector<const LogEntry*> picked;
+        picked.reserve(static_cast<size_t>(lines));
+        for (auto it = log_buffer.rbegin(); it != log_buffer.rend() && static_cast<int>(picked.size()) < lines; ++it) {
+            if (source != "all") {
+                // Match either a leading-slash node ("/mower_logic") or
+                // unprefixed ("mower_logic"). Substring is enough because
+                // we restrict via the whitelist above.
+                if (it->source.find(source) == std::string::npos) continue;
+            }
+            picked.push_back(&(*it));
+        }
+        for (auto rit = picked.rbegin(); rit != picked.rend(); ++rit) {
+            const LogEntry *e = *rit;
+            json je;
+            je["ts"] = e->ts;
+            je["level"] = e->level;
+            je["source"] = e->source;
+            je["msg"] = e->msg;
+            entries.push_back(std::move(je));
+        }
+        return json::object({{"entries", entries}});
+    }),
+    RPC_METHOD("system.restart_service", {
+        // Params: { service?: string }. Default 'openmower' restarts the
+        // container (== whole stack). Always responds with {ok: true} BEFORE
+        // killing the process, otherwise the caller never sees the response.
+        std::string service = "openmower";
+        if (params.is_object() && params.contains("service") && params["service"].is_string()) {
+            service = params["service"].get<std::string>();
+        }
+        if (kRestartServices.find(service) == kRestartServices.end()) {
+            throw xbot_rpc::RpcException(xbot_rpc::RpcError::ERROR_INVALID_PARAMS,
+                                          "Unknown service; allowed: openmower, "
+                                          "mower_logic, xbot_monitoring, move_base_flex");
+        }
+        ROS_WARN_STREAM("system.restart_service requested for '" << service
+                        << "' — terminating container (PID 1).");
+        // Defer the kill so that the RPC response is written to MQTT first.
+        // Docker's restart-policy (unless-stopped in the OMOSv2 compose) will
+        // bring us back; per-node restarts within the container are not
+        // supported here — every option restarts the whole container.
+        std::thread([]() {
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            std::raise(SIGTERM);
+        }).detach();
+        return json::object({{"ok", true}});
     }),
 }});
 
@@ -980,6 +1110,10 @@ int main(int argc, char **argv) {
         "/slic3r_coverage_planner/path_marker_array", 1, coverage_path_callback);
     ros::Subscriber mowingTrailSubscriber = n->subscribe(
         "/mower_logic/mowing_path", 10, mowing_trail_callback);
+    // /rosout_agg is the aggregated log stream that rqt_console reads from.
+    // Buffered via rosout_callback so logs.tail() can return recent history.
+    ros::Subscriber rosoutSubscriber = n->subscribe(
+        "/rosout_agg", 100, rosout_callback);
 
     cmd_vel_pub = n->advertise<geometry_msgs::Twist>("xbot_monitoring/remote_cmd_vel", 1);
     action_pub = n->advertise<std_msgs::String>("xbot/action", 1);

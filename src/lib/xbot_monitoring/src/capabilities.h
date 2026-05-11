@@ -6,4 +6,6 @@ inline const nlohmann::ordered_json CAPABILITIES = {
     {"rpc", 1},
     {"map:json", 1},
     {"mqtt:params", 1},
+    {"logs.tail", 1},
+    {"system.restart_service", 1},
 };

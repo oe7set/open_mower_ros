@@ -27,6 +27,7 @@
   <depend>xbot_rpc</depend>
   <depend>roslib</depend>
   <depend>dynamic_reconfigure</depend>
+  <depend>rosgraph_msgs</depend>
 
   <!-- The export tag contains other, unspecified, tags -->
   <export>

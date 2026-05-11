@@ -16,6 +16,7 @@ find_package(catkin REQUIRED COMPONENTS
         grid_map_core
         grid_map_ros
         grid_map_msgs
+        rosgraph_msgs
         xbot_rpc
         dynamic_reconfigure
         )
