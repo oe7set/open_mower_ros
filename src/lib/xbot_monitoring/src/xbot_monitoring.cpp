@@ -403,6 +403,13 @@ static std::string rosout_level_to_string(int8_t level) {
     }
 }
 
+// Bridge: mower_sessions_recorder publishes the JSON sessions list as a
+// std_msgs/String on `xbot_monitoring/mowing_sessions`; we rebroadcast it
+// retained on MQTT for the openmower-app /statistics page.
+void mowing_sessions_callback(const std_msgs::String::ConstPtr &msg) {
+    try_publish("mowing_sessions/json", msg->data, true);
+}
+
 void rosout_callback(const rosgraph_msgs::Log::ConstPtr &msg) {
     LogEntry e;
     e.ts = msg->header.stamp.toSec();
@@ -1325,11 +1332,8 @@ int main(int argc, char **argv) {
         "/rosout_agg", 100, rosout_callback);
     // mower_sessions_recorder publishes the full JSON sessions list as String;
     // we rebroadcast it retained on MQTT for the openmower-app /statistics page.
-    ros::Subscriber mowingSessionsSubscriber = n->subscribe<std_msgs::String>(
-        "xbot_monitoring/mowing_sessions", 1,
-        [](const std_msgs::String::ConstPtr &msg) {
-            try_publish("mowing_sessions/json", msg->data, true);
-        });
+    ros::Subscriber mowingSessionsSubscriber = n->subscribe(
+        "xbot_monitoring/mowing_sessions", 1, mowing_sessions_callback);
 
     cmd_vel_pub = n->advertise<geometry_msgs::Twist>("xbot_monitoring/remote_cmd_vel", 1);
     action_pub = n->advertise<std_msgs::String>("xbot/action", 1);
