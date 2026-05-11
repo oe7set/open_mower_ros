@@ -26,6 +26,8 @@ The persisted file at ~/.openmower/schedules.json has the shape:
   }
 """
 
+from __future__ import annotations
+
 import datetime
 import json
 import os
