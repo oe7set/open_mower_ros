@@ -52,6 +52,7 @@ void publish_actions();
 void publish_version();
 void publish_params();
 void rpc_request_callback(const std::string &payload);
+void try_publish(std::string topic, std::string data, bool retain = false);
 
 // Stores registered actions (prefix to vector<action>)
 std::map<std::string, std::vector<xbot_msgs::ActionInfo>> registered_actions;
