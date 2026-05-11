@@ -31,6 +31,7 @@ on:
       - 'main'
       - 'releases/**'
       - 'v2'
+      - 'feature/**'
     tags:
       - 'v*'
   pull_request:
