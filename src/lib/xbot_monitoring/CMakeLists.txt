@@ -31,6 +31,9 @@ find_package(
 find_package(PahoMqttCpp REQUIRED)
 set(PahoMqttCpp_LIBRARIES PahoMqttCpp::paho-mqttpp3)
 
+# yaml-cpp for the meta.config.* YAML bridge.
+find_package(yaml-cpp REQUIRED)
+
 catkin_package(
         #  INCLUDE_DIRS include
         #  LIBRARIES mower_comms
@@ -53,11 +56,12 @@ include_directories(
 
 add_executable(xbot_monitoring
         src/xbot_monitoring.cpp
-        src/config_io.cpp)
+        src/config_io.cpp
+        src/yaml_io.cpp)
 
 
 add_dependencies(xbot_monitoring ${catkin_EXPORTED_TARGETS} ${${PROJECT_NAME}_EXPORTED_TARGETS})
-target_link_libraries(xbot_monitoring ${catkin_LIBRARIES} ${PahoMqttCpp_LIBRARIES} nlohmann_json::nlohmann_json)
+target_link_libraries(xbot_monitoring ${catkin_LIBRARIES} ${PahoMqttCpp_LIBRARIES} nlohmann_json::nlohmann_json yaml-cpp)
 
 add_executable(xbot_sensor_example
         src/xbot_sensor_example.cpp)

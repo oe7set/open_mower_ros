@@ -28,6 +28,7 @@
   <depend>roslib</depend>
   <depend>dynamic_reconfigure</depend>
   <depend>rosgraph_msgs</depend>
+  <depend>yaml-cpp</depend>
 
   <!-- The export tag contains other, unspecified, tags -->
   <export>

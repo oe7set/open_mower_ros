@@ -1,0 +1,11 @@
+<launch>
+  <!-- Path to the sessions store. Defaults to a directory under ROS_HOME so
+       the file persists across container restarts via the OpenMowerOS
+       /data/ros volume mount. -->
+  <arg name="sessions_path" default="$(optenv ROS_HOME $(env HOME)/.ros)/openmower/mowing_sessions.json"/>
+
+  <node pkg="mower_sessions_recorder" type="recorder.py" name="mower_sessions_recorder"
+        output="screen" respawn="true" respawn_delay="10">
+    <param name="sessions_path" value="$(arg sessions_path)"/>
+  </node>
+</launch>

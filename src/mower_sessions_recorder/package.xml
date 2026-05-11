@@ -1,0 +1,28 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>mower_sessions_recorder</name>
+  <version>0.0.1</version>
+  <description>
+    Records mowing sessions for OpenMower. Subscribes to mower_logic's
+    high-level state and the absolute pose; on every MOWING enter/exit
+    transition, accumulates duration and travelled distance and persists the
+    session to disk. Publishes the full list as JSON on
+    xbot_monitoring/mowing_sessions so xbot_monitoring rebroadcasts it to
+    MQTT (mowing_sessions/json) for the openmower-app /statistics page.
+  </description>
+  <maintainer email="noreply@openmower.de">OpenMower contributors</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+
+  <build_depend>std_msgs</build_depend>
+  <build_depend>mower_msgs</build_depend>
+  <build_depend>xbot_msgs</build_depend>
+
+  <exec_depend>rospy</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>mower_msgs</exec_depend>
+  <exec_depend>xbot_msgs</exec_depend>
+
+  <export/>
+</package>

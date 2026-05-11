@@ -4,12 +4,15 @@
 //
 #include <chrono>
 #include <csignal>
+#include <cstdlib>
 #include <deque>
 #include <filesystem>
+#include <functional>
 #include <thread>
 #include <unordered_set>
 
 #include "config_io.h"
+#include "yaml_io.h"
 #include "ros/ros.h"
 #include "rosgraph_msgs/Log.h"
 #include <ros/package.h>
@@ -202,6 +205,179 @@ static json& load_schema_cached() {
     return schema_cache;
 }
 
+// ----- YAML-bridge helpers -------------------------------------------------
+// OpenMowerOS v2 stores config in three YAML layers:
+//   1) <pkg>/params/openmower_defaults_v2.yaml          (image-baked defaults)
+//   2) <pkg>/params/hardware_specific/<MOWER>/params_v2.yaml  (image-baked HW)
+//   3) <PARAMS_PATH>/mower_params.yaml                  (host-mounted user)
+// The legacy schema (mower_config.schema.json) speaks OM_*; a separate JSON
+// mapping file translates each OM_* key to the YAML dotted path it lives
+// under. meta.config.get reads-merged + reverse-mapped; meta.config.set
+// writes only into the user layer (the only writable one) and pushes the
+// value into ros::param so live nodes see it without restart.
+
+// Resolve user-override YAML path (writable). Default matches Compose mount.
+static std::string get_user_yaml_path() {
+    std::string path;
+    ros::param::param<std::string>("~user_yaml_path", path, std::string("/data/params/mower_params.yaml"));
+    return path;
+}
+
+// Resolve image-baked defaults YAML.
+static std::string get_defaults_yaml_path() {
+    std::string path;
+    if (ros::param::get("~defaults_yaml_path", path) && !path.empty()) {
+        return path;
+    }
+    std::string pkg = ros::package::getPath("open_mower");
+    if (!pkg.empty()) {
+        std::string candidate = pkg + "/params/openmower_defaults_v2.yaml";
+        if (std::filesystem::exists(candidate)) return candidate;
+    }
+    return "/opt/open_mower_ros/src/open_mower/params/openmower_defaults_v2.yaml";
+}
+
+// Resolve OM_* → YAML mapping JSON file.
+static std::string get_yaml_mapping_path() {
+    std::string path;
+    if (ros::param::get("~yaml_mapping_path", path) && !path.empty()) {
+        return path;
+    }
+    std::string pkg = ros::package::getPath("open_mower");
+    if (!pkg.empty()) {
+        std::string candidate = pkg + "/../../config/mower_config.yaml_mapping.json";
+        if (std::filesystem::exists(candidate)) return candidate;
+    }
+    return "/opt/open_mower_ros/config/mower_config.yaml_mapping.json";
+}
+
+// Cache of the OM_* → YAML mapping; lazily loaded.
+static std::mutex mapping_cache_mutex;
+static json mapping_cache;
+static bool mapping_cache_loaded = false;
+
+static const json& load_mapping_cached() {
+    std::lock_guard<std::mutex> lk(mapping_cache_mutex);
+    if (!mapping_cache_loaded) {
+        std::string raw = xbot_monitoring::config_io::read_text_file(get_yaml_mapping_path());
+        mapping_cache = json::parse(raw);
+        mapping_cache_loaded = true;
+    }
+    return mapping_cache;
+}
+
+// Read all three YAML layers (image-baked defaults, hardware-specific
+// defaults selected by the MOWER env var, host-mounted user override) and
+// deep-merge them so the frontend sees the same effective values the running
+// stack does. Falling back gracefully if hardware layer is missing.
+static json read_merged_yaml_config() {
+    json merged;
+    try {
+        merged = xbot_monitoring::yaml_io::read_yaml_file(get_defaults_yaml_path());
+    } catch (...) {
+        merged = json::object();
+    }
+    // Hardware-specific defaults: <pkg>/params/hardware_specific/<MOWER>/params_v2.yaml.
+    const char* mower = std::getenv("MOWER");
+    if (mower && *mower) {
+        std::string pkg = ros::package::getPath("open_mower");
+        if (!pkg.empty()) {
+            std::string hw_path = pkg + "/params/hardware_specific/" + mower + "/params_v2.yaml";
+            if (std::filesystem::exists(hw_path)) {
+                try {
+                    json hw = xbot_monitoring::yaml_io::read_yaml_file(hw_path);
+                    xbot_monitoring::yaml_io::deep_merge(merged, hw);
+                } catch (const std::exception& e) {
+                    ROS_WARN_STREAM("meta.config.get: failed to read hw layer " << hw_path << ": " << e.what());
+                }
+            }
+        }
+    }
+    try {
+        json user_yaml = xbot_monitoring::yaml_io::read_yaml_file(get_user_yaml_path());
+        xbot_monitoring::yaml_io::deep_merge(merged, user_yaml);
+    } catch (const std::exception& e) {
+        ROS_WARN_STREAM("meta.config.get: failed to read user layer: " << e.what());
+    }
+    return merged;
+}
+
+// Coerce a JSON value (which may have arrived as a string from the frontend)
+// to the type the schema expects for a given OM_* key. Frontend forms commonly
+// emit numbers as strings; YAML stores them as numbers. Without this we'd
+// flip "47.301" (number) into "47.301" (string) on first save and break
+// downstream consumers.
+static json coerce_value_for_schema(const std::string& om_key, const json& value) {
+    // Walk schema looking for the property whose x-environment-variable matches.
+    // Schema is small (~700 lines) and the recursion depth is shallow, so a
+    // simple DFS is fine; we don't bother caching per-key.
+    std::function<const json*(const json&)> find_prop = [&](const json& node) -> const json* {
+        if (!node.is_object()) return nullptr;
+        if (node.contains("x-environment-variable") && node["x-environment-variable"].is_string() &&
+            node["x-environment-variable"].get<std::string>() == om_key) {
+            return &node;
+        }
+        if (node.contains("properties") && node["properties"].is_object()) {
+            for (auto it = node["properties"].begin(); it != node["properties"].end(); ++it) {
+                if (auto p = find_prop(it.value())) return p;
+            }
+        }
+        for (const char* branch : {"allOf", "anyOf", "oneOf"}) {
+            if (node.contains(branch) && node[branch].is_array()) {
+                for (const auto& sub : node[branch]) {
+                    if (sub.is_object()) {
+                        if (sub.contains("then") && sub["then"].is_object()) {
+                            if (auto p = find_prop(sub["then"])) return p;
+                        }
+                        if (sub.contains("else") && sub["else"].is_object()) {
+                            if (auto p = find_prop(sub["else"])) return p;
+                        }
+                        if (auto p = find_prop(sub)) return p;
+                    }
+                }
+            }
+        }
+        return nullptr;
+    };
+
+    const json* prop = nullptr;
+    try {
+        prop = find_prop(load_schema_cached());
+    } catch (...) {
+        // Schema unavailable — pass the value through as-is.
+        return value;
+    }
+    if (!prop || !prop->contains("type") || !(*prop)["type"].is_string()) return value;
+    std::string type = (*prop)["type"].get<std::string>();
+
+    if (value.is_string()) {
+        const std::string& s = value.get<std::string>();
+        if (type == "number") {
+            try { return std::stod(s); } catch (...) { return value; }
+        } else if (type == "integer") {
+            try { return std::stoll(s); } catch (...) { return value; }
+        } else if (type == "boolean") {
+            if (s == "true" || s == "True" || s == "1") return true;
+            if (s == "false" || s == "False" || s == "0") return false;
+        }
+    }
+    return value;
+}
+
+// Push a single value into ros::param so live nodes see the change without
+// a restart. YAML path "ll.services.gps.datum_lat" → ROS param
+// "/ll/services/gps/datum_lat". Falls silent on type errors — caller logs.
+static void apply_to_ros_param(const std::string& yaml_path, const json& value) {
+    if (yaml_path.empty()) return;
+    std::string ros_path = "/" + yaml_path;
+    for (char& c : ros_path) if (c == '.') c = '/';
+
+    if (value.is_boolean()) ros::param::set(ros_path, value.get<bool>());
+    else if (value.is_number_integer()) ros::param::set(ros_path, value.get<int>());
+    else if (value.is_number_float()) ros::param::set(ros_path, value.get<double>());
+    else if (value.is_string()) ros::param::set(ros_path, value.get<std::string>());
+}
+
 // Ring buffer for /rosout_agg, populated by rosout_callback. logs.tail RPC
 // reads from here. Capacity is generous (~5000) so that a 1000-line query
 // always finds enough history without keeping the journal forever.
@@ -294,9 +470,22 @@ xbot_rpc::RpcProvider rpc_provider("xbot_monitoring", {{
         }
     }),
     RPC_METHOD("meta.config.get", {
+        // Reads the merged YAML config (defaults + user-override) and projects
+        // it back into the OM_*-keyed map the frontend expects via the YAML
+        // mapping JSON. Keys mapped to null (read-only hardware identifiers)
+        // are skipped silently.
         try {
-            std::string raw = xbot_monitoring::config_io::read_text_file(get_mower_config_path());
-            return xbot_monitoring::config_io::parse_config_sh(raw);
+            const json& mapping = load_mapping_cached();
+            json merged = read_merged_yaml_config();
+            json out = json::object();
+            for (auto it = mapping.begin(); it != mapping.end(); ++it) {
+                if (it.key().rfind("_", 0) == 0) continue;  // skip _comment etc.
+                if (!it.value().is_string()) continue;       // null mapping → not editable
+                const std::string yaml_path = it.value().get<std::string>();
+                const json* v = xbot_monitoring::yaml_io::read_path(merged, yaml_path);
+                if (v) out[it.key()] = *v;
+            }
+            return out;
         } catch (const std::exception& e) {
             throw xbot_rpc::RpcException(xbot_rpc::RpcError::ERROR_INTERNAL,
                                           std::string("Failed to read config: ") + e.what());
@@ -316,18 +505,38 @@ xbot_rpc::RpcProvider rpc_provider("xbot_monitoring", {{
                                           "Expected an object of {key: value} changes");
         }
         try {
-            std::string path = get_mower_config_path();
-            std::string original;
-            try {
-                original = xbot_monitoring::config_io::read_text_file(path);
-            } catch (...) {
-                // First-time write — file may not exist yet.
-                original = "# Generated by xbot_monitoring meta.config.set\n";
+            const json& mapping = load_mapping_cached();
+            const std::string user_path = get_user_yaml_path();
+            json user_yaml = xbot_monitoring::yaml_io::read_yaml_file(user_path);
+
+            json updated_keys = json::array();
+            json skipped_keys = json::array();
+            for (auto it = changes.begin(); it != changes.end(); ++it) {
+                const std::string& om_key = it.key();
+                if (!mapping.contains(om_key)) {
+                    skipped_keys.push_back(om_key);
+                    continue;
+                }
+                const auto& mapped = mapping.at(om_key);
+                if (!mapped.is_string()) {
+                    // null mapping = read-only or no YAML target.
+                    skipped_keys.push_back(om_key);
+                    continue;
+                }
+                const std::string yaml_path = mapped.get<std::string>();
+                json coerced = coerce_value_for_schema(om_key, it.value());
+                xbot_monitoring::yaml_io::write_path(user_yaml, yaml_path, coerced);
+                apply_to_ros_param(yaml_path, coerced);
+                updated_keys.push_back(om_key);
             }
-            std::string updated = xbot_monitoring::config_io::write_config_sh(original, changes);
-            xbot_monitoring::config_io::write_text_file_atomic(path, updated);
-            ROS_INFO_STREAM("meta.config.set wrote " << changes.size() << " change(s) to " << path);
-            return json::object({{"updated", changes.size()}});
+
+            xbot_monitoring::yaml_io::write_yaml_file_atomic(user_path, user_yaml);
+            ROS_INFO_STREAM("meta.config.set wrote " << updated_keys.size()
+                             << " change(s) to " << user_path
+                             << " (skipped " << skipped_keys.size() << " unmapped)");
+            return json::object({{"updated", updated_keys.size()},
+                                 {"updated_keys", updated_keys},
+                                 {"skipped_keys", skipped_keys}});
         } catch (const std::exception& e) {
             throw xbot_rpc::RpcException(xbot_rpc::RpcError::ERROR_INTERNAL,
                                           std::string("Failed to write config: ") + e.what());
@@ -1114,6 +1323,13 @@ int main(int argc, char **argv) {
     // Buffered via rosout_callback so logs.tail() can return recent history.
     ros::Subscriber rosoutSubscriber = n->subscribe(
         "/rosout_agg", 100, rosout_callback);
+    // mower_sessions_recorder publishes the full JSON sessions list as String;
+    // we rebroadcast it retained on MQTT for the openmower-app /statistics page.
+    ros::Subscriber mowingSessionsSubscriber = n->subscribe<std_msgs::String>(
+        "xbot_monitoring/mowing_sessions", 1,
+        [](const std_msgs::String::ConstPtr &msg) {
+            try_publish("mowing_sessions/json", msg->data, true);
+        });
 
     cmd_vel_pub = n->advertise<geometry_msgs::Twist>("xbot_monitoring/remote_cmd_vel", 1);
     action_pub = n->advertise<std_msgs::String>("xbot/action", 1);

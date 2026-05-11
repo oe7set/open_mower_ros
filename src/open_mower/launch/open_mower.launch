@@ -22,11 +22,15 @@
     <node pkg="xbot_monitoring" type="xbot_monitoring" name="xbot_monitoring" output="screen" respawn="true"
           respawn_delay="10">
         <remap from="/xbot_monitoring/remote_cmd_vel" to="/joy_vel"/>
-        <!-- Schema and live config paths used by the meta.config.* RPC methods.
-             The schema ships with the open_mower package; the .sh file lives in
-             the user's home (the OpenMowerOS image places it there). -->
+        <!-- Schema and config paths used by the meta.config.* RPC methods.
+             The schema ships with the open_mower package; the YAML files are
+             the actual runtime config (defaults baked in the image, user
+             override on the host volume). -->
         <param name="mower_config_schema_path" value="$(find open_mower)/../../config/mower_config.schema.json"/>
         <param name="mower_config_path" value="$(optenv HOME /root)/mower_config.sh"/>
+        <param name="defaults_yaml_path" value="$(find open_mower)/params/openmower_defaults_v2.yaml"/>
+        <param name="user_yaml_path" value="$(optenv PARAMS_PATH /data/params)/mower_params.yaml"/>
+        <param name="yaml_mapping_path" value="$(find open_mower)/../../config/mower_config.yaml_mapping.json"/>
     </node>
 
     <node pkg="xbot_monitoring" type="heatmap_generator" name="heatmap_generator" output="screen" respawn="true"
@@ -40,6 +44,7 @@
     <node pkg="mower_logic" type="monitoring" name="monitoring" output="screen" respawn="true" respawn_delay="10"/>
 
     <include file="$(find mower_scheduler)/launch/scheduler.launch"/>
+    <include file="$(find mower_sessions_recorder)/launch/recorder.launch"/>
 
     <include file="$(find open_mower)/launch/include/_params.launch"/>
 </launch>
