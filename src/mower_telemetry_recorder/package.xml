@@ -1,0 +1,31 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>mower_telemetry_recorder</name>
+  <version>0.0.1</version>
+  <description>
+    Records pose, GPS, WLAN, IMU and selected sensor values at 4 Hz while
+    mower_logic is in MOWING / PAUSED. One JSONL file per mowing session
+    plus an index. Exposes telemetry.list_sessions and telemetry.get_session
+    RPC methods so the openmower-app heatmap page can render the recorded
+    samples on top of the map.
+  </description>
+  <maintainer email="noreply@openmower.de">OpenMower contributors</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+
+  <build_depend>std_msgs</build_depend>
+  <build_depend>sensor_msgs</build_depend>
+  <build_depend>mower_msgs</build_depend>
+  <build_depend>xbot_msgs</build_depend>
+  <build_depend>xbot_rpc</build_depend>
+
+  <exec_depend>rospy</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>mower_msgs</exec_depend>
+  <exec_depend>xbot_msgs</exec_depend>
+  <exec_depend>xbot_rpc</exec_depend>
+
+  <export/>
+</package>

@@ -1,0 +1,23 @@
+<launch>
+  <!-- Where to drop the per-session JSONL files and index.json. /data/ros is
+       the OpenMowerOS volume mount that survives container restarts; the
+       recorder also keeps a code-level fallback for dev workspaces. -->
+  <arg name="telemetry_path" default="/data/ros/openmower/telemetry"/>
+
+  <!-- Sensor IDs whose latest published value gets folded into every sample.
+       The defaults match the Sabo build; override in a stack-local launch
+       file if you want a different set. -->
+  <arg name="telemetry_sensor_ids" default="[
+    om_mow_motor_current,
+    om_mow_motor_temp,
+    om_left_esc_temp,
+    om_right_esc_temp,
+    om_v_battery
+  ]"/>
+
+  <node pkg="mower_telemetry_recorder" type="recorder.py" name="mower_telemetry_recorder"
+        output="screen" respawn="true" respawn_delay="10">
+    <param name="telemetry_path" value="$(arg telemetry_path)"/>
+    <rosparam param="telemetry_sensor_ids" subst_value="True">$(arg telemetry_sensor_ids)</rosparam>
+  </node>
+</launch>

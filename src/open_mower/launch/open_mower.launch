@@ -45,6 +45,7 @@
 
     <include file="$(find mower_scheduler)/launch/scheduler.launch"/>
     <include file="$(find mower_sessions_recorder)/launch/recorder.launch"/>
+    <include file="$(find mower_telemetry_recorder)/launch/recorder.launch"/>
 
     <include file="$(find open_mower)/launch/include/_params.launch"/>
 </launch>
