@@ -193,6 +193,15 @@ static std::string get_mower_config_schema_path() {
 
 // Cache of the parsed schema; loaded lazily to avoid I/O on every RPC call.
 static std::mutex schema_cache_mutex;
+
+// Serialises the read-modify-write cycle on the user YAML file inside
+// meta.config.set. Concurrent RPC handlers run on independent MQTT callback
+// threads — without this lock, two parallel saves (e.g. two browser tabs
+// hitting "Save" within ms of each other) both load the same on-disk state,
+// apply their own changes, then race to write_yaml_file_atomic. The second
+// write wins and the first set of changes is silently lost. The atomic write
+// only guarantees crash safety, not concurrency safety.
+static std::mutex config_write_mutex;
 static json schema_cache;
 static bool schema_cache_loaded = false;
 
@@ -513,6 +522,10 @@ xbot_rpc::RpcProvider rpc_provider("xbot_monitoring", {{
                                           "Expected an object of {key: value} changes");
         }
         try {
+            // Hold the lock for the full read-modify-write cycle so a second
+            // meta.config.set running on a parallel MQTT thread cannot read
+            // the same on-disk state and clobber our update.
+            std::lock_guard<std::mutex> config_lk(config_write_mutex);
             const json& mapping = load_mapping_cached();
             const std::string user_path = get_user_yaml_path();
             json user_yaml = xbot_monitoring::yaml_io::read_yaml_file(user_path);

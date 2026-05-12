@@ -40,6 +40,11 @@ class GpsServiceInterface : public GpsServiceInterfaceBase {
   // numSV / pDOP are not exposed by the xbot_framework GpsService yet — we
   // ship them as 0 so the schema stays uniform across hardware platforms.
   uint8_t last_fix_type_{0};
+  // Wall-clock of the most recent position update — if the firmware stops
+  // delivering positions (GPS antenna unplugged, robot in a tunnel, etc.) we
+  // downgrade fix_type to 0 in OnTransactionEnd so the dashboard does not
+  // keep claiming "RTK Fixed" while the receiver is actually blind.
+  ros::Time last_position_update_{0};
 
   std::string protocol_;
   uint32_t baud_rate_;

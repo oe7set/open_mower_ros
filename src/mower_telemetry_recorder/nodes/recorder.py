@@ -82,6 +82,15 @@ MAX_SESSIONS = 200
 # "send me a 10 MB blob over MQTT" requests.
 MAX_SAMPLES_PER_RESPONSE = 50_000
 
+# Hard cap on JSONL session file size accepted by telemetry.get_session.
+# MAX_SAMPLES_PER_RESPONSE only bounds the *output* — without an input bound
+# the recorder still has to stream the entire file from disk into memory
+# before truncating, which OOMs the broker when a runaway session
+# (recorder forgot to close, days of activity) hits multiple hundred MB.
+# 200 MB ≈ 30 h at 4 Hz with the current sample shape, well above any
+# legitimate single mowing session.
+MAX_SESSION_BYTES = 200 * 1024 * 1024
+
 # JSON-RPC error codes — same constants as scheduler.py.
 ERROR_INVALID_PARAMS = -32602
 ERROR_INTERNAL = -32603
@@ -397,6 +406,20 @@ class TelemetryRpcServer:
         path = self.store.session_path_if_exists(sid)
         if path is None:
             raise RpcException(ERROR_INVALID_PARAMS, f"unknown session id: {sid}")
+        try:
+            size = os.path.getsize(path)
+        except OSError as e:
+            raise RpcException(ERROR_INTERNAL, f"cannot stat session file: {e}")
+        if size > MAX_SESSION_BYTES:
+            # The frontend should suggest re-querying with a higher stride; we
+            # surface the limit so it can compute a sensible value rather than
+            # guess. We deliberately raise INVALID_PARAMS, not INTERNAL — the
+            # caller can recover by changing the request.
+            raise RpcException(
+                ERROR_INVALID_PARAMS,
+                f"session file too large ({size} bytes > {MAX_SESSION_BYTES}); "
+                f"retry with a higher stride or open the JSONL directly",
+            )
         samples: list[dict] = []
         truncated = False
         with open(path, "r", encoding="utf-8") as f:

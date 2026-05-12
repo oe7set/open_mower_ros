@@ -111,6 +111,7 @@ void GpsServiceInterface::OnPositionChanged(const double* new_value, uint32_t le
     ROS_INFO_STREAM("OnPositionChanged called with length " << length);
     return;
   }
+  last_position_update_ = ros::Time::now();
   if (absolute_coords_) {
     SendNMEA(new_value[0], new_value[1]);
     double e, n;
@@ -144,6 +145,11 @@ void GpsServiceInterface::OnFixTypeChanged(const char* new_value, uint32_t lengt
   } else if (type == "FLOAT") {
     pose_msg_.flags |= xbot_msgs::AbsolutePose::FLAG_GPS_RTK_FLOAT;
     last_fix_type_ = 4;  // RTK float
+  } else if (type == "NONE" || type == "INVALID" || length == 0) {
+    // Firmware explicitly reports loss of fix — propagate that immediately
+    // instead of holding the previous "FIX"/"FLOAT" until the position
+    // watchdog in OnTransactionEnd fires.
+    last_fix_type_ = 0;
   } else {
     // Anything else the firmware reports — assume a 3D fix is at least there
     // (DGPS / 3D / 2D distinction isn't exposed by the v2 service). The
@@ -185,6 +191,18 @@ void GpsServiceInterface::OnVehicleHeadingAndAccuracyChanged(const double* new_v
 
 void GpsServiceInterface::OnTransactionEnd() {
   absolute_pose_publisher_.publish(pose_msg_);
+
+  // Stale-fix watchdog: when the firmware stops delivering positions (antenna
+  // unplugged, indoors, GpsService crash) we never get a "NONE" fix-type
+  // event — the last known FIX/FLOAT just stops getting refreshed. Without
+  // this guard the dashboard happily shows "RTK Fixed" for hours after the
+  // receiver went blind. Three seconds is generous for the 5..10 Hz update
+  // rate of an F9P/F9R while still hiding the obvious failure mode.
+  static constexpr double kFixStaleSeconds = 3.0;
+  if (last_position_update_.isZero() ||
+      (ros::Time::now() - last_position_update_).toSec() > kFixStaleSeconds) {
+    last_fix_type_ = 0;
+  }
 
   xbot_msgs::GpsStatus status_msg;
   status_msg.header.stamp = pose_msg_.header.stamp;
