@@ -18,6 +18,10 @@
 #include <mower_msgs/Power.h>
 #include <xbot_msgs/SensorDataString.h>
 
+#include <fstream>
+#include <sstream>
+#include <string>
+
 #include "mower_logic/MowerLogicConfig.h"
 #include "mower_logic/PowerConfig.h"
 #include "mower_msgs/HighLevelStatus.h"
@@ -28,10 +32,6 @@
 #include "xbot_msgs/RobotState.h"
 #include "xbot_msgs/SensorDataDouble.h"
 #include "xbot_msgs/SensorInfo.h"
-
-#include <fstream>
-#include <sstream>
-#include <string>
 
 ros::Publisher state_pub;
 xbot_msgs::RobotState state;

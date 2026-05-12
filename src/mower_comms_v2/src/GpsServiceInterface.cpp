@@ -16,9 +16,9 @@
 GpsServiceInterface::GpsServiceInterface(uint16_t service_id, const xbot::serviceif::Context& ctx,
                                          const ros::Publisher& absolute_pose_publisher,
                                          const ros::Publisher& nmea_publisher,
-                                         const ros::Publisher& gps_status_publisher, double datum_lat, double datum_long,
-                                         double datum_height, uint32_t baud_rate, const std::string& protocol,
-                                         uint8_t port_index, bool absolute_coords)
+                                         const ros::Publisher& gps_status_publisher, double datum_lat,
+                                         double datum_long, double datum_height, uint32_t baud_rate,
+                                         const std::string& protocol, uint8_t port_index, bool absolute_coords)
     : GpsServiceInterfaceBase(service_id, ctx),
       absolute_pose_publisher_(absolute_pose_publisher),
       nmea_publisher_(nmea_publisher),
