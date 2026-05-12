@@ -61,3 +61,8 @@ cmake-build-debug/
 .vscode
 .venv
 src/cmake-build-debug-ros
+
+# ai
+.claude
+CLAUDE.md
+BACKEND_DEPLOY.md

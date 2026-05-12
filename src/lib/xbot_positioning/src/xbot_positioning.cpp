@@ -290,6 +290,10 @@ void onPose(const xbot_msgs::AbsolutePose::ConstPtr &msg) {
             if (std::sqrt(std::pow(msg->motion_vector.x, 2) + std::pow(msg->motion_vector.y, 2)) >= min_speed) {
                 core.updateOrientation2(msg->motion_vector.x, msg->motion_vector.y, 10000.0);
             }
+            // Use direct vehicle heading from dual-antenna GPS (e.g. UM982) if available
+            if (msg->orientation_valid) {
+                core.updateOrientation(msg->vehicle_heading, 100.0);
+            }
         }
     } else {
         ROS_WARN_STREAM("GPS outlier found. Distance was: " << distance_to_last_gps);
