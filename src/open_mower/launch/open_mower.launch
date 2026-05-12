@@ -1,7 +1,12 @@
 <launch>
     <include file="$(find open_mower)/launch/include/_comms.launch"/>
-    <include file="$(find open_mower)/launch/include/_move_base.launch"/>
+    <!-- Bring the localization stack up before move_base_flex so the map → odom →
+         base_link TF chain is already flowing when MBF initialises its costmaps;
+         otherwise the global costmap logs "canTransform: target_frame map does not
+         exist" warnings for the first few seconds until xbot_positioning publishes
+         its first pose. -->
     <include file="$(find open_mower)/launch/include/_localization.launch"/>
+    <include file="$(find open_mower)/launch/include/_move_base.launch"/>
     <include file="$(find open_mower)/launch/include/_teleop.launch"/>
     <include file="$(find open_mower)/launch/include/_record.launch">
         <arg name="prefix" value="mow_area"/>

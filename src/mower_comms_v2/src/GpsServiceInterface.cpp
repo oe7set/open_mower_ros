@@ -199,8 +199,7 @@ void GpsServiceInterface::OnTransactionEnd() {
   // receiver went blind. Three seconds is generous for the 5..10 Hz update
   // rate of an F9P/F9R while still hiding the obvious failure mode.
   static constexpr double kFixStaleSeconds = 3.0;
-  if (last_position_update_.isZero() ||
-      (ros::Time::now() - last_position_update_).toSec() > kFixStaleSeconds) {
+  if (last_position_update_.isZero() || (ros::Time::now() - last_position_update_).toSec() > kFixStaleSeconds) {
     last_fix_type_ = 0;
   }
 
