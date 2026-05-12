@@ -189,6 +189,14 @@ void GpsServiceInterface::OnVehicleHeadingAndAccuracyChanged(const double* new_v
   pose_msg_.orientation_valid = true;
 }
 
+void GpsServiceInterface::OnSatelliteCountChanged(const uint8_t& new_value) {
+  last_satellite_count_ = new_value;
+}
+
+void GpsServiceInterface::OnPDOPChanged(const float& new_value) {
+  last_pdop_ = new_value;
+}
+
 void GpsServiceInterface::OnTransactionEnd() {
   absolute_pose_publisher_.publish(pose_msg_);
 
@@ -201,15 +209,15 @@ void GpsServiceInterface::OnTransactionEnd() {
   static constexpr double kFixStaleSeconds = 3.0;
   if (last_position_update_.isZero() || (ros::Time::now() - last_position_update_).toSec() > kFixStaleSeconds) {
     last_fix_type_ = 0;
+    last_satellite_count_ = 0;
+    last_pdop_ = 0.0f;
   }
 
   xbot_msgs::GpsStatus status_msg;
   status_msg.header.stamp = pose_msg_.header.stamp;
   status_msg.header.frame_id = "gps";
   status_msg.fix_type = last_fix_type_;
-  // numSV and pDOP are not exposed by the v2 firmware GpsService — the
-  // frontend treats them as N/A when zero.
-  status_msg.satellite_count = 0;
-  status_msg.pdop = 0.0f;
+  status_msg.satellite_count = last_satellite_count_;
+  status_msg.pdop = last_pdop_;
   gps_status_publisher_.publish(status_msg);
 }

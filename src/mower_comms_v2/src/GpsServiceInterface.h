@@ -26,6 +26,8 @@ class GpsServiceInterface : public GpsServiceInterfaceBase {
   void OnMotionVectorENUChanged(const double* new_value, uint32_t length) override;
   void OnMotionHeadingAndAccuracyChanged(const double* new_value, uint32_t length) override;
   void OnVehicleHeadingAndAccuracyChanged(const double* new_value, uint32_t length) override;
+  void OnSatelliteCountChanged(const uint8_t& new_value) override;
+  void OnPDOPChanged(const float& new_value) override;
 
  private:
   void OnTransactionStart(uint64_t timestamp) override;
@@ -37,9 +39,9 @@ class GpsServiceInterface : public GpsServiceInterfaceBase {
 
   // Last known fix_type on the v2 service. We map the FIX/FLOAT string
   // delivered by the firmware to the same 0..5 scale the frontend expects.
-  // numSV / pDOP are not exposed by the xbot_framework GpsService yet — we
-  // ship them as 0 so the schema stays uniform across hardware platforms.
   uint8_t last_fix_type_{0};
+  uint8_t last_satellite_count_{0};
+  float last_pdop_{0.0f};
   // Wall-clock of the most recent position update — if the firmware stops
   // delivering positions (GPS antenna unplugged, robot in a tunnel, etc.) we
   // downgrade fix_type to 0 in OnTransactionEnd so the dashboard does not
