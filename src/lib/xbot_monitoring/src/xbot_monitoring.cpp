@@ -1014,6 +1014,13 @@ void robot_state_callback(const xbot_msgs::RobotState::ConstPtr &msg) {
     j["pose"]["heading_accuracy"] = msg->robot_pose.orientation_accuracy;
     j["pose"]["heading_valid"] = msg->robot_pose.orientation_valid;
 
+    // R9a — detailed GPS + WLAN fields the App's /dashboard and /heatmap need.
+    j["gps_fix_type"] = msg->gps_fix_type;
+    j["gps_satellite_count"] = msg->gps_satellite_count;
+    j["gps_pdop"] = msg->gps_pdop;
+    j["wifi_signal_dbm"] = msg->wifi_signal_dbm;
+    j["wifi_link_quality"] = msg->wifi_link_quality;
+
     try_publish("robot_state/json", j.dump());
     json data;
     data["d"] = j;

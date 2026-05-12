@@ -24,9 +24,14 @@
 #include "mower_msgs/Status.h"
 #include "ros/ros.h"
 #include "xbot_msgs/AbsolutePose.h"
+#include "xbot_msgs/GpsStatus.h"
 #include "xbot_msgs/RobotState.h"
 #include "xbot_msgs/SensorDataDouble.h"
 #include "xbot_msgs/SensorInfo.h"
+
+#include <fstream>
+#include <sstream>
+#include <string>
 
 ros::Publisher state_pub;
 xbot_msgs::RobotState state;
@@ -124,6 +129,59 @@ void high_level_status(const mower_msgs::HighLevelStatus::ConstPtr& msg) {
   state_pub.publish(state);
 }
 
+void gps_status_received(const xbot_msgs::GpsStatus::ConstPtr& msg) {
+  state.gps_fix_type = msg->fix_type;
+  state.gps_satellite_count = msg->satellite_count;
+  state.gps_pdop = msg->pdop;
+}
+
+// Reads /proc/net/wireless (no privileged calls or external binaries needed).
+// On a host without WLAN (e.g. Ethernet-only setups) the file either misses
+// or has only the header lines; we fall back to dbm=0, quality=0 so the
+// frontend can render an "N/A" state instead of crashing on parse errors.
+//
+// /proc/net/wireless format (Linux kernel):
+//   Inter-| sta-|   Quality        |   Discarded packets               | Missed | WE
+//    face | tus | link level noise |  nwid  crypt   frag  retry   misc | beacon | 22
+//      wlan0: 0000   54.  -56.  -256        0      0      0      0      0        0
+// We take 'link' as the 0..70 quality and 'level' as signed dBm.
+static void update_wifi_stats() {
+  std::ifstream f("/proc/net/wireless");
+  if (!f.is_open()) {
+    state.wifi_signal_dbm = 0;
+    state.wifi_link_quality = 0.0f;
+    return;
+  }
+  std::string line;
+  // Skip the two header lines; the first interface entry comes after them.
+  std::getline(f, line);
+  std::getline(f, line);
+  if (!std::getline(f, line)) {
+    state.wifi_signal_dbm = 0;
+    state.wifi_link_quality = 0.0f;
+    return;
+  }
+  // Drop the leading whitespace and the "iface:" prefix.
+  std::istringstream iss(line);
+  std::string iface;
+  iss >> iface;  // "wlan0:"
+  int status;
+  double link, level;
+  if (!(iss >> status >> link >> level)) {
+    state.wifi_signal_dbm = 0;
+    state.wifi_link_quality = 0.0f;
+    return;
+  }
+  // /proc/net/wireless prints values like "54." (dot suffix). std::istringstream
+  // tolerates that, but `link` is a quality counter 0..70 (driver-specific scale).
+  // We normalise to 0..1 by clamping at /70.
+  double q = link / 70.0;
+  if (q < 0.0) q = 0.0;
+  if (q > 1.0) q = 1.0;
+  state.wifi_link_quality = static_cast<float>(q);
+  state.wifi_signal_dbm = static_cast<int16_t>(level);
+}
+
 void pose_received(const xbot_msgs::AbsolutePose::ConstPtr& msg) {
   state.robot_pose = *msg;
 
@@ -131,6 +189,10 @@ void pose_received(const xbot_msgs::AbsolutePose::ConstPtr& msg) {
   static ros::Time last_update{0};
   if ((msg->header.stamp - last_update).toSec() < 0.5) return;
   last_update = msg->header.stamp;
+
+  // Refresh WLAN stats at the same rate as pose updates — cheap (one
+  // /proc read per 0.5 s) and naturally rate-limited.
+  update_wifi_stats();
 
   xbot_msgs::SensorDataDouble sensor_data;
   sensor_data.stamp = msg->header.stamp;
@@ -345,6 +407,10 @@ int main(int argc, char** argv) {
   ros::Subscriber right_esc_status_state_subscriber =
       n->subscribe("/ll/diff_drive/right_esc_status", 10, right_esc_status_received);
   ros::Subscriber pose_state_subscriber = n->subscribe("/xbot_positioning/xb_pose", 10, pose_received);
+  // mower_comms_v2 publishes detailed GPS fix metadata at this topic. v1's
+  // driver_gps_node publishes the same shape on /<gps_node>/gps_status if/when
+  // we wire that up — for now only v2 is in use on the actual hardware.
+  ros::Subscriber gps_status_subscriber = n->subscribe("/ll/position/gps_status", 10, gps_status_received);
 
   state_pub = n->advertise<xbot_msgs::RobotState>("xbot_monitoring/robot_state", 10);
 

@@ -15,6 +15,7 @@ add_message_files(
         SensorDataString.msg
         SensorDataDouble.msg
         RobotState.msg
+        GpsStatus.msg
         MapSize.msg
         ActionInfo.msg
         MapOverlay.msg

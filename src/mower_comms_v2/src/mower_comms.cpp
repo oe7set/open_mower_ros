@@ -251,11 +251,14 @@ int main(int argc, char** argv) {
   ROS_INFO_STREAM("Datum: " << datum_lat << ", " << datum_long << ", " << datum_height);
   gps_position_pub = n.advertise<xbot_msgs::AbsolutePose>("ll/position/gps", 1);
   nmea_pub = n.advertise<nmea_msgs::Sentence>("ll/position/gps/nmea", 1);
+  // Detailed GPS fix metadata for the dashboard chip and the heatmap-page
+  // correlation in the openmower-app.
+  ros::Publisher gps_status_pub = n.advertise<xbot_msgs::GpsStatus>("ll/position/gps_status", 1);
   bool absolute_coords = true;
   paramNh.getParam("services/gps/absolute_coords", absolute_coords);
   gps_service = std::make_unique<GpsServiceInterface>(xbot::service_ids::GPS, ctx, gps_position_pub, nmea_pub,
-                                                      datum_lat, datum_long, datum_height, baud_rate, protocol,
-                                                      gps_port_index, absolute_coords);
+                                                      gps_status_pub, datum_lat, datum_long, datum_height, baud_rate,
+                                                      protocol, gps_port_index, absolute_coords);
   gps_service->Start();
 
   // Input service

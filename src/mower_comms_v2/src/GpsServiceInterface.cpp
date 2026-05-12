@@ -15,12 +15,14 @@
 
 GpsServiceInterface::GpsServiceInterface(uint16_t service_id, const xbot::serviceif::Context& ctx,
                                          const ros::Publisher& absolute_pose_publisher,
-                                         const ros::Publisher& nmea_publisher, double datum_lat, double datum_long,
+                                         const ros::Publisher& nmea_publisher,
+                                         const ros::Publisher& gps_status_publisher, double datum_lat, double datum_long,
                                          double datum_height, uint32_t baud_rate, const std::string& protocol,
                                          uint8_t port_index, bool absolute_coords)
     : GpsServiceInterfaceBase(service_id, ctx),
       absolute_pose_publisher_(absolute_pose_publisher),
       nmea_publisher_(nmea_publisher),
+      gps_status_publisher_(gps_status_publisher),
       baud_rate_(baud_rate),
       protocol_(protocol),
       port_index_(port_index),
@@ -138,8 +140,16 @@ void GpsServiceInterface::OnFixTypeChanged(const char* new_value, uint32_t lengt
   std::string type(new_value, length);
   if (type == "FIX") {
     pose_msg_.flags |= xbot_msgs::AbsolutePose::FLAG_GPS_RTK_FIXED;
+    last_fix_type_ = 5;  // RTK fixed
   } else if (type == "FLOAT") {
     pose_msg_.flags |= xbot_msgs::AbsolutePose::FLAG_GPS_RTK_FLOAT;
+    last_fix_type_ = 4;  // RTK float
+  } else {
+    // Anything else the firmware reports — assume a 3D fix is at least there
+    // (DGPS / 3D / 2D distinction isn't exposed by the v2 service). The
+    // frontend mostly uses 5/4/anything-else for the RTK chip, so a single
+    // "non-RTK fix" bucket is enough.
+    last_fix_type_ = 2;
   }
 }
 
@@ -175,4 +185,14 @@ void GpsServiceInterface::OnVehicleHeadingAndAccuracyChanged(const double* new_v
 
 void GpsServiceInterface::OnTransactionEnd() {
   absolute_pose_publisher_.publish(pose_msg_);
+
+  xbot_msgs::GpsStatus status_msg;
+  status_msg.header.stamp = pose_msg_.header.stamp;
+  status_msg.header.frame_id = "gps";
+  status_msg.fix_type = last_fix_type_;
+  // numSV and pDOP are not exposed by the v2 firmware GpsService — the
+  // frontend treats them as N/A when zero.
+  status_msg.satellite_count = 0;
+  status_msg.pdop = 0.0f;
+  gps_status_publisher_.publish(status_msg);
 }

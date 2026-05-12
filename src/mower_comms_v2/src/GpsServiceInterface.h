@@ -6,13 +6,15 @@
 #define GPSSERVICEINTERFACE_H
 #include <ros/publisher.h>
 #include <xbot_msgs/AbsolutePose.h>
+#include <xbot_msgs/GpsStatus.h>
 
 #include <GpsServiceInterfaceBase.hpp>
 
 class GpsServiceInterface : public GpsServiceInterfaceBase {
  public:
   GpsServiceInterface(uint16_t service_id, const xbot::serviceif::Context& ctx, const ros::Publisher& imu_publisher,
-                      const ros::Publisher& nmea_publisher, double datum_lat, double datum_long, double datum_height,
+                      const ros::Publisher& nmea_publisher, const ros::Publisher& gps_status_publisher,
+                      double datum_lat, double datum_long, double datum_height,
                       uint32_t baud_rate, const std::string& protocol, uint8_t port_index, bool absolute_coords);
 
   bool OnConfigurationRequested(uint16_t service_id) override;
@@ -31,6 +33,13 @@ class GpsServiceInterface : public GpsServiceInterfaceBase {
 
   const ros::Publisher& absolute_pose_publisher_;
   const ros::Publisher& nmea_publisher_;
+  const ros::Publisher& gps_status_publisher_;
+
+  // Last known fix_type on the v2 service. We map the FIX/FLOAT string
+  // delivered by the firmware to the same 0..5 scale the frontend expects.
+  // numSV / pDOP are not exposed by the xbot_framework GpsService yet — we
+  // ship them as 0 so the schema stays uniform across hardware platforms.
+  uint8_t last_fix_type_{0};
 
   std::string protocol_;
   uint32_t baud_rate_;
