@@ -64,7 +64,14 @@ ERROR_INVALID_PARAMS = -32602
 ERROR_INTERNAL = -32603
 
 DEFAULT_PATH = os.path.expanduser("~/.openmower/schedules.json")
-START_ACTION_ID = "mower_logic/start_mowing"
+# Mirrors MOWER_ACTIONS.startMowing in openmower-app/src/lib/mowerActions.ts
+# and the IdleBehavior::handle_action match in
+# open_mower_ros/src/mower_logic/.../IdleBehavior.cpp. The ":idle/" namespace
+# prefix is mandatory — without it IdleBehavior silently drops the message.
+START_ACTION_ID = "mower_logic:idle/start_mowing"
+# ROS param read by MowingBehavior to pick the starting area; the same channel
+# that map.start_in_area writes to. MowingBehavior resets it to -1 after use.
+NEXT_AREA_PARAM = "/mower_logic/next_area_index"
 TICK_INTERVAL_SECONDS = 60.0
 # How far back a missed occurrence can still be picked up. Covers transient
 # blockers like a 5-min docking cycle, but bounds the window so a schedule
@@ -500,17 +507,31 @@ class SchedulerNode:
         return None
 
     def _fire(self, schedule: dict, occurrence_utc: datetime.datetime, now_utc: datetime.datetime) -> None:
-        rospy.loginfo("Firing schedule %s (%s)", schedule["id"], schedule["name"])
-        # Patch 3 will introduce per-area triggers; for now we just kick off
-        # the generic start_mowing action and rely on whatever area selection
-        # mower_logic has cached. The areas[] list is forwarded as a ROS
-        # parameter so a future Patch-3 follow-up can pick it up.
-        if schedule.get("areas"):
-            rospy.set_param("/mower_scheduler/last_fired_areas", list(schedule["areas"]))
+        areas = schedule.get("areas") or []
+        area_index = areas[0] if areas else None
+        if len(areas) > 1:
+            rospy.logwarn_throttle(
+                300,
+                "Schedule %s lists %d areas; only the first (%d) will be used. "
+                "Multi-area scheduling is not implemented yet.",
+                schedule["id"], len(areas), area_index,
+            )
+        if area_index is not None:
+            # Same channel map.start_in_area uses; MowingBehavior consumes and
+            # clears it on entry, so we don't need to reset it here.
+            rospy.set_param(NEXT_AREA_PARAM, int(area_index))
+            rospy.loginfo(
+                "Firing schedule %s (%s) in area %d", schedule["id"], schedule["name"], area_index,
+            )
+        else:
+            rospy.loginfo("Firing schedule %s (%s)", schedule["id"], schedule["name"])
+        # Persist before publishing so a crash between the two does not lead
+        # to the action firing again on the next tick: the dedup check in
+        # evaluate_due() relies on _last_fired_iso being on disk.
+        self.store.record_fire(schedule["id"], occurrence_utc)
         msg = String()
         msg.data = START_ACTION_ID
         self._action_pub.publish(msg)
-        self.store.record_fire(schedule["id"], occurrence_utc)
 
 
 def main() -> None:
