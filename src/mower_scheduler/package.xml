@@ -23,7 +23,6 @@
   <exec_depend>xbot_rpc</exec_depend>
   <exec_depend>python3-dateutil</exec_depend>
   <exec_depend>python3-tzdata</exec_depend>
-  <exec_depend>python3-backports.zoneinfo</exec_depend>
 
   <export/>
 </package>

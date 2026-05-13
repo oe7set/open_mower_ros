@@ -39,15 +39,24 @@ from typing import Any, Optional
 
 import rospy
 from dateutil.rrule import rrulestr
+from dateutil.tz import gettz
 from std_msgs.msg import String
 from xbot_msgs.msg import RobotState
 from xbot_rpc.msg import RpcError, RpcRequest, RpcResponse
 from xbot_rpc.srv import RegisterMethodsSrv, RegisterMethodsSrvRequest
 
-try:
-    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
-except ImportError:  # pragma: no cover — Python < 3.9 fallback (Noetic ships 3.8)
-    from backports.zoneinfo import ZoneInfo, ZoneInfoNotFoundError  # type: ignore
+
+def _resolve_zone(name: str):
+    """Resolve an IANA zone name. Returns None if the name is unknown.
+
+    `dateutil.tz.gettz` works on Python 3.8 (Noetic) without needing a separate
+    zoneinfo backport. We avoid `zoneinfo` directly because it pulls in either
+    a 3.9+ stdlib or a `python3-backports.zoneinfo` apt package that has no
+    rosdep mapping on Focal.
+    """
+    if not isinstance(name, str) or not name:
+        return None
+    return gettz(name)
 
 # JSON-RPC error codes mirror xbot_rpc/RpcError.msg constants. We avoid pulling
 # them off the message class because that requires generated bindings.
@@ -241,14 +250,14 @@ class ScheduleStore:
     @staticmethod
     def _zone_for(schedule: dict) -> Any:
         tz_name = schedule.get("timezone") or "UTC"
-        try:
-            return ZoneInfo(tz_name)
-        except ZoneInfoNotFoundError:
+        tz = _resolve_zone(tz_name)
+        if tz is None:
             rospy.logwarn_throttle(
                 300, "Schedule %s has unknown timezone %r, falling back to UTC",
                 schedule.get("id"), tz_name,
             )
-            return ZoneInfo("UTC")
+            return _resolve_zone("UTC") or datetime.timezone.utc
+        return tz
 
     def _public_view(self, schedule: dict, now_utc: datetime.datetime) -> dict:
         out: dict = {k: v for k, v in schedule.items() if not k.startswith("_")}
@@ -320,10 +329,8 @@ class ScheduleStore:
             )
         if not isinstance(tz_name, str):
             raise RpcException(ERROR_INVALID_PARAMS, "timezone must be a string")
-        try:
-            ZoneInfo(tz_name)
-        except ZoneInfoNotFoundError as e:
-            raise RpcException(ERROR_INVALID_PARAMS, f"invalid timezone {tz_name!r}: {e}")
+        if _resolve_zone(tz_name) is None:
+            raise RpcException(ERROR_INVALID_PARAMS, f"invalid timezone {tz_name!r}")
 
         cleaned = {
             "id": sid,
