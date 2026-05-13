@@ -19,6 +19,7 @@ The persisted file at ~/.openmower/schedules.json has the shape:
         "areas": [0],
         "rrule": "FREQ=WEEKLY;BYDAY=MO,WE,FR;BYHOUR=10;BYMINUTE=0",
         "duration_minutes": 60,
+        "timezone": "Europe/Vienna",
         "weather": {"skip_if_rain": true},
         "pattern": {"angle_offset": 0.0, "rotate_by_days": 7}
       }
@@ -34,7 +35,6 @@ import os
 import secrets
 import tempfile
 import threading
-import time
 from typing import Any, Optional
 
 import rospy
@@ -44,6 +44,11 @@ from xbot_msgs.msg import RobotState
 from xbot_rpc.msg import RpcError, RpcRequest, RpcResponse
 from xbot_rpc.srv import RegisterMethodsSrv, RegisterMethodsSrvRequest
 
+try:
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+except ImportError:  # pragma: no cover — Python < 3.9 fallback (Noetic ships 3.8)
+    from backports.zoneinfo import ZoneInfo, ZoneInfoNotFoundError  # type: ignore
+
 # JSON-RPC error codes mirror xbot_rpc/RpcError.msg constants. We avoid pulling
 # them off the message class because that requires generated bindings.
 ERROR_INVALID_PARAMS = -32602
@@ -52,11 +57,22 @@ ERROR_INTERNAL = -32603
 DEFAULT_PATH = os.path.expanduser("~/.openmower/schedules.json")
 START_ACTION_ID = "mower_logic/start_mowing"
 TICK_INTERVAL_SECONDS = 60.0
+# How far back a missed occurrence can still be picked up. Covers transient
+# blockers like a 5-min docking cycle, but bounds the window so a schedule
+# stuck in "charging" all night does not suddenly fire at 04:00.
+CATCHUP_WINDOW = datetime.timedelta(hours=1)
 ROBOT_STATE_TOPIC = "xbot_monitoring/robot_state"
 ACTION_TOPIC = "/xbot/action"
 
 NODE_ID = "mower_scheduler"
 RPC_METHODS = ("schedule.list", "schedule.upsert", "schedule.delete")
+
+# Skip reason constants shared with the openrpc.json contract.
+SKIP_NO_STATE = "no_state"
+SKIP_EMERGENCY = "emergency"
+SKIP_NOT_IDLE = "not_idle"
+SKIP_CHARGING = "charging"
+SKIP_RAIN = "rain"
 
 
 class RpcException(Exception):
@@ -68,12 +84,29 @@ class RpcException(Exception):
         self.message = message
 
 
+def _utcnow() -> datetime.datetime:
+    return datetime.datetime.now(datetime.timezone.utc)
+
+
+def _parse_iso_utc(value: Optional[str]) -> Optional[datetime.datetime]:
+    if not value:
+        return None
+    try:
+        dt = datetime.datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        # Legacy values written before TZ-aware times existed are in local time;
+        # normalise via the system zone so dedup comparisons stay consistent.
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+    return dt.astimezone(datetime.timezone.utc)
+
+
 class ScheduleStore:
     """Atomic JSON file backing for the schedule list.
 
-    The store keeps every schedule's `_last_fired_iso` field separate from the
-    user-visible payload — that lets us deduplicate fires across restarts
-    without leaking implementation details into the RPC surface.
+    The store keeps every schedule's `_last_fired_iso` and skip-reason fields
+    separate from the user-visible payload so RPC clients see a clean shape.
     """
 
     def __init__(self, path: str):
@@ -112,21 +145,25 @@ class ScheduleStore:
             raise
 
     def list_public(self) -> list[dict]:
+        now = _utcnow()
         with self._lock:
-            return [self._strip_internal(s) for s in self._schedules]
+            return [self._public_view(s, now) for s in self._schedules]
 
     def upsert(self, schedule: dict) -> dict:
         cleaned = self._validate(schedule)
         with self._lock:
             for i, existing in enumerate(self._schedules):
                 if existing["id"] == cleaned["id"]:
-                    cleaned["_last_fired_iso"] = existing.get("_last_fired_iso")
+                    # Preserve runtime state across edits.
+                    for key in ("_last_fired_iso", "_last_skip_reason", "_last_skip_at"):
+                        if key in existing:
+                            cleaned[key] = existing[key]
                     self._schedules[i] = cleaned
                     self._save_unlocked()
-                    return self._strip_internal(cleaned)
+                    return self._public_view(cleaned, _utcnow())
             self._schedules.append(cleaned)
             self._save_unlocked()
-            return self._strip_internal(cleaned)
+            return self._public_view(cleaned, _utcnow())
 
     def delete(self, schedule_id: str) -> None:
         with self._lock:
@@ -135,50 +172,119 @@ class ScheduleStore:
             if len(self._schedules) != before:
                 self._save_unlocked()
 
-    def take_due(self, now: datetime.datetime, window_seconds: float) -> list[dict]:
-        """Return enabled schedules with an RRULE occurrence inside the
-        window [now - window, now]; mark them as fired.
+    def evaluate_due(self, now_utc: datetime.datetime) -> list[tuple[dict, datetime.datetime]]:
+        """Return enabled schedules with an unfired occurrence inside the
+        catch-up window, paired with the (UTC) occurrence timestamp.
 
-        Mutates the store and persists; should be called from the tick loop.
+        Pure read against the store — does not mutate or persist; the caller
+        is expected to call `record_fire` / `record_skip` afterwards.
         """
-        fired: list[dict] = []
-        window_start = now - datetime.timedelta(seconds=window_seconds)
+        candidates: list[tuple[dict, datetime.datetime]] = []
+        window_start_utc = now_utc - CATCHUP_WINDOW
         with self._lock:
-            mutated = False
             for s in self._schedules:
                 if not s.get("enabled", False):
                     continue
                 rule_str = s.get("rrule")
                 if not rule_str:
                     continue
+                tz = self._zone_for(s)
+                window_start_local = window_start_utc.astimezone(tz)
+                now_local = now_utc.astimezone(tz)
                 try:
-                    rule = rrulestr(rule_str, dtstart=window_start.replace(tzinfo=None))
+                    rule = rrulestr(rule_str, dtstart=window_start_local)
                 except Exception as e:  # noqa: BLE001 — defensive against malformed RRULEs
                     rospy.logwarn_throttle(
                         300, "Schedule %s has invalid RRULE %r: %s", s.get("id"), rule_str, e
                     )
                     continue
-                between = rule.between(window_start.replace(tzinfo=None), now.replace(tzinfo=None), inc=True)
+                between = rule.between(window_start_local, now_local, inc=True)
                 if not between:
                     continue
-                # Deduplicate against last fire time.
-                last_iso = s.get("_last_fired_iso")
-                last_dt = (
-                    datetime.datetime.fromisoformat(last_iso) if last_iso else None
-                )
-                most_recent = between[-1]
-                if last_dt is not None and most_recent <= last_dt:
+                most_recent_utc = between[-1].astimezone(datetime.timezone.utc)
+                last_fired = _parse_iso_utc(s.get("_last_fired_iso"))
+                if last_fired is not None and most_recent_utc <= last_fired:
                     continue
-                s["_last_fired_iso"] = most_recent.isoformat()
-                fired.append(self._strip_internal(s))
-                mutated = True
-            if mutated:
+                # Snapshot the dict so callers see a stable view even if the
+                # store mutates underneath.
+                candidates.append((dict(s), most_recent_utc))
+        return candidates
+
+    def record_fire(self, schedule_id: str, occurrence_utc: datetime.datetime) -> None:
+        iso = occurrence_utc.astimezone(datetime.timezone.utc).isoformat()
+        with self._lock:
+            for s in self._schedules:
+                if s["id"] != schedule_id:
+                    continue
+                s["_last_fired_iso"] = iso
+                # A successful firing clears any stale skip annotation.
+                s.pop("_last_skip_reason", None)
+                s.pop("_last_skip_at", None)
                 self._save_unlocked()
-        return fired
+                return
+
+    def record_skip(self, schedule_id: str, reason: str, now_utc: datetime.datetime) -> None:
+        iso = now_utc.astimezone(datetime.timezone.utc).isoformat()
+        with self._lock:
+            for s in self._schedules:
+                if s["id"] != schedule_id:
+                    continue
+                # Avoid rewriting the file when the same reason persists across
+                # consecutive ticks — that would thrash the SD card.
+                if s.get("_last_skip_reason") == reason and s.get("_last_skip_at"):
+                    return
+                s["_last_skip_reason"] = reason
+                s["_last_skip_at"] = iso
+                self._save_unlocked()
+                return
 
     @staticmethod
-    def _strip_internal(schedule: dict) -> dict:
-        return {k: v for k, v in schedule.items() if not k.startswith("_")}
+    def _zone_for(schedule: dict) -> Any:
+        tz_name = schedule.get("timezone") or "UTC"
+        try:
+            return ZoneInfo(tz_name)
+        except ZoneInfoNotFoundError:
+            rospy.logwarn_throttle(
+                300, "Schedule %s has unknown timezone %r, falling back to UTC",
+                schedule.get("id"), tz_name,
+            )
+            return ZoneInfo("UTC")
+
+    def _public_view(self, schedule: dict, now_utc: datetime.datetime) -> dict:
+        out: dict = {k: v for k, v in schedule.items() if not k.startswith("_")}
+        # Only emit read-only status fields when they have a value, mirroring
+        # the openrpc.json contract (these properties are optional, not nullable).
+        last_fired = schedule.get("_last_fired_iso")
+        if last_fired:
+            out["last_fired_at"] = last_fired
+        skip_reason = schedule.get("_last_skip_reason")
+        if skip_reason:
+            out["last_skip_reason"] = skip_reason
+        skip_at = schedule.get("_last_skip_at")
+        if skip_at:
+            out["last_skip_at"] = skip_at
+        nxt = self._next_run(schedule, now_utc)
+        if nxt:
+            out["next_run"] = nxt
+        return out
+
+    @staticmethod
+    def _next_run(schedule: dict, now_utc: datetime.datetime) -> Optional[str]:
+        if not schedule.get("enabled", False):
+            return None
+        rule_str = schedule.get("rrule")
+        if not rule_str:
+            return None
+        tz = ScheduleStore._zone_for(schedule)
+        now_local = now_utc.astimezone(tz)
+        try:
+            rule = rrulestr(rule_str, dtstart=now_local)
+        except Exception:  # noqa: BLE001
+            return None
+        nxt = rule.after(now_local, inc=False)
+        if nxt is None:
+            return None
+        return nxt.astimezone(datetime.timezone.utc).isoformat()
 
     @staticmethod
     def _validate(schedule: Any) -> dict:
@@ -203,6 +309,21 @@ class ScheduleStore:
         duration_minutes = schedule.get("duration_minutes", 60)
         if not isinstance(duration_minutes, (int, float)) or duration_minutes <= 0:
             raise RpcException(ERROR_INVALID_PARAMS, "duration_minutes must be a positive number")
+        # Timezone is required for the contract; legacy files without it are
+        # patched to UTC on load so they keep working until the user re-saves.
+        tz_name = schedule.get("timezone")
+        if tz_name is None:
+            tz_name = "UTC"
+            rospy.logwarn(
+                "Schedule %s has no timezone, defaulting to UTC. Re-save in the app to pin it.",
+                sid,
+            )
+        if not isinstance(tz_name, str):
+            raise RpcException(ERROR_INVALID_PARAMS, "timezone must be a string")
+        try:
+            ZoneInfo(tz_name)
+        except ZoneInfoNotFoundError as e:
+            raise RpcException(ERROR_INVALID_PARAMS, f"invalid timezone {tz_name!r}: {e}")
 
         cleaned = {
             "id": sid,
@@ -211,6 +332,7 @@ class ScheduleStore:
             "areas": list(areas),
             "rrule": rrule,
             "duration_minutes": int(duration_minutes),
+            "timezone": tz_name,
         }
         if "weather" in schedule and isinstance(schedule["weather"], dict):
             cleaned["weather"] = {"skip_if_rain": bool(schedule["weather"].get("skip_if_rain", False))}
@@ -256,6 +378,10 @@ class SchedulerNode:
         # Tick loop. We use a Timer so it runs even if rospy.spin() is busy
         # processing a flood of RPC messages.
         rospy.Timer(rospy.Duration(TICK_INTERVAL_SECONDS), self._tick)
+        # The Timer's first fire is `TICK_INTERVAL_SECONDS` away; do an
+        # immediate evaluation so a schedule that just became due at boot
+        # is picked up without the 60 s delay.
+        rospy.Timer(rospy.Duration(1.0), self._tick, oneshot=True)
 
     def _on_state(self, msg: RobotState) -> None:
         with self._state_lock:
@@ -326,41 +452,47 @@ class SchedulerNode:
         self._rpc_error_pub.publish(msg)
 
     def _tick(self, _event) -> None:
-        now = datetime.datetime.now()
-        # On first tick after start we pretend the previous tick was 60 s ago
-        # so we don't replay the entire morning's schedule; subsequent ticks
-        # cover the actual interval between firings.
-        due = self.store.take_due(now, TICK_INTERVAL_SECONDS)
-        if not due:
+        now_utc = _utcnow()
+        candidates = self.store.evaluate_due(now_utc)
+        if not candidates:
             return
 
         with self._state_lock:
             state = self._state
 
-        if state is None:
-            rospy.loginfo("Skipping %d due schedule(s) — robot_state not received yet", len(due))
-            return
-        if state.emergency:
-            rospy.loginfo("Skipping %d due schedule(s) — emergency active", len(due))
-            return
-        if state.current_state != "IDLE":
+        # Determine the global block reason once — it applies uniformly to
+        # every due candidate, so we annotate them all with the same skip.
+        global_reason = self._global_block_reason(state)
+        if global_reason:
             rospy.loginfo(
-                "Skipping %d due schedule(s) — current_state is %s",
-                len(due),
-                state.current_state,
+                "Skipping %d due schedule(s) — %s",
+                len(candidates),
+                global_reason,
             )
-            return
-        if state.is_charging and state.battery_percentage < 0.95:
-            rospy.loginfo("Skipping %d due schedule(s) — still charging", len(due))
+            for schedule, _ in candidates:
+                self.store.record_skip(schedule["id"], global_reason, now_utc)
             return
 
-        for schedule in due:
-            if schedule.get("weather", {}).get("skip_if_rain") and state.rain_detected:
+        for schedule, occurrence_utc in candidates:
+            if schedule.get("weather", {}).get("skip_if_rain") and getattr(state, "rain_detected", False):
                 rospy.loginfo("Skipping schedule %s — rain detected", schedule["id"])
+                self.store.record_skip(schedule["id"], SKIP_RAIN, now_utc)
                 continue
-            self._fire(schedule)
+            self._fire(schedule, occurrence_utc, now_utc)
 
-    def _fire(self, schedule: dict) -> None:
+    @staticmethod
+    def _global_block_reason(state: Optional[RobotState]) -> Optional[str]:
+        if state is None:
+            return SKIP_NO_STATE
+        if state.emergency:
+            return SKIP_EMERGENCY
+        if state.current_state != "IDLE":
+            return SKIP_NOT_IDLE
+        if state.is_charging and state.battery_percentage < 0.95:
+            return SKIP_CHARGING
+        return None
+
+    def _fire(self, schedule: dict, occurrence_utc: datetime.datetime, now_utc: datetime.datetime) -> None:
         rospy.loginfo("Firing schedule %s (%s)", schedule["id"], schedule["name"])
         # Patch 3 will introduce per-area triggers; for now we just kick off
         # the generic start_mowing action and rely on whatever area selection
@@ -371,6 +503,7 @@ class SchedulerNode:
         msg = String()
         msg.data = START_ACTION_ID
         self._action_pub.publish(msg)
+        self.store.record_fire(schedule["id"], occurrence_utc)
 
 
 def main() -> None:
