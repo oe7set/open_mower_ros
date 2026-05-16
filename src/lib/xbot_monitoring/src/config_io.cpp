@@ -73,9 +73,19 @@ void collect_defaults(const json& schema, json& out) {
       collect_defaults(prop, out);
     }
   }
-  // Schemas in this repo also use allOf / if-then-else for conditional fields.
-  // The defaults inside `then` / `else` are not unconditional, so we skip them
-  // here and rely on the form to apply them via the schema engine.
+  // Conditional branches (e.g. NTRIP fields under gps_settings.NTRIP.allOf[0].then)
+  // also need their defaults projected into defaults.yaml — without this the
+  // frontend renders empty inputs for any field the user hasn't already
+  // persisted into mower_params.yaml.
+  for (const char* branch : {"allOf", "anyOf", "oneOf"}) {
+    if (!schema.contains(branch) || !schema[branch].is_array()) continue;
+    for (const auto& sub : schema[branch]) {
+      if (!sub.is_object()) continue;
+      if (sub.contains("then")) collect_defaults(sub["then"], out);
+      if (sub.contains("else")) collect_defaults(sub["else"], out);
+      collect_defaults(sub, out);
+    }
+  }
 }
 
 }  // namespace

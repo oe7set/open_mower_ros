@@ -966,9 +966,11 @@ xbot_rpc::RpcProvider rpc_provider("xbot_monitoring", {{
                     got = true;
                 }
             }
-            if (!got) {
-                values[name] = nullptr;
-            }
+            // Leave the key out of the response when the param is not set on
+            // the server. The frontend treats the absence as "fall back to
+            // the schema default"; emitting JSON null instead would make RHF
+            // coerce it to the string "null" and break validation.
+            (void)got;
         }
         return json::object({{"values", values}});
     }),
