@@ -18,6 +18,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <set>
 #include <sstream>
 
@@ -212,6 +213,104 @@ std::string write_config_sh(const std::string& original, const json& changes) {
   }
 
   return out.str();
+}
+
+json read_env_file(const std::string& path) {
+  if (!fs::exists(path)) {
+    return json::object();
+  }
+  std::string content = read_text_file(path);
+  return parse_config_sh(content);
+}
+
+namespace {
+
+// Helper: extract a string field from a schema node, returning "" if absent.
+std::string string_field(const json& node, const char* key) {
+  if (!node.is_object()) return {};
+  auto it = node.find(key);
+  if (it == node.end() || !it->is_string()) return {};
+  return it->get<std::string>();
+}
+
+bool bool_field(const json& node, const char* key) {
+  if (!node.is_object()) return false;
+  auto it = node.find(key);
+  if (it == node.end() || !it->is_boolean()) return false;
+  return it->get<bool>();
+}
+
+// JSON Schema 'type' may be a single string or an array of strings — pick the
+// first non-null entry.
+std::string type_of(const json& node) {
+  auto it = node.find("type");
+  if (it == node.end()) return {};
+  if (it->is_string()) return it->get<std::string>();
+  if (it->is_array()) {
+    for (const auto& t : *it) {
+      if (t.is_string() && t.get<std::string>() != "null") return t.get<std::string>();
+    }
+  }
+  return {};
+}
+
+// Recursively walk the schema, calling `visit` for every property node that
+// has either x-environment-variable or x-source annotated. The traversal
+// follows allOf/anyOf/oneOf branches (then/else included) so conditional
+// fields are picked up too.
+void walk_schema(const json& node, const std::function<void(const json&)>& visit) {
+  if (!node.is_object()) return;
+
+  if (node.contains("x-environment-variable") || node.contains("x-source") ||
+      node.contains("x-yaml-path") || node.contains("x-ros-param")) {
+    visit(node);
+  }
+
+  if (node.contains("properties") && node["properties"].is_object()) {
+    for (auto it = node["properties"].begin(); it != node["properties"].end(); ++it) {
+      walk_schema(it.value(), visit);
+    }
+  }
+
+  for (const char* branch : {"allOf", "anyOf", "oneOf"}) {
+    if (!node.contains(branch) || !node[branch].is_array()) continue;
+    for (const auto& sub : node[branch]) {
+      if (!sub.is_object()) continue;
+      if (sub.contains("then")) walk_schema(sub["then"], visit);
+      if (sub.contains("else")) walk_schema(sub["else"], visit);
+      walk_schema(sub, visit);
+    }
+  }
+
+  if (node.contains("additionalProperties") && node["additionalProperties"].is_object()) {
+    walk_schema(node["additionalProperties"], visit);
+  }
+}
+
+}  // namespace
+
+SchemaLeafIndex collect_schema_leaves(const json& schema) {
+  SchemaLeafIndex idx;
+  walk_schema(schema, [&](const json& node) {
+    SchemaLeaf leaf;
+    leaf.env_var = string_field(node, "x-environment-variable");
+    leaf.source = string_field(node, "x-source");
+    leaf.yaml_path = string_field(node, "x-yaml-path");
+    leaf.ros_param = string_field(node, "x-ros-param");
+    leaf.readonly_via_ui = bool_field(node, "x-readonly-via-ui");
+    leaf.type = type_of(node);
+    idx.all.push_back(leaf);
+    if (!leaf.env_var.empty()) {
+      idx.by_env_var[leaf.env_var] = leaf;
+    }
+    if (!leaf.yaml_path.empty()) {
+      idx.by_yaml_path[leaf.yaml_path] = leaf;
+    }
+    if (!leaf.ros_param.empty()) {
+      idx.by_ros_param[leaf.ros_param] = leaf;
+    }
+  });
+  return idx;
 }
 
 json defaults_yaml_from_schema(const json& schema) {

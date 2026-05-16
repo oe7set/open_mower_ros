@@ -19,7 +19,10 @@
           ],
           "default": "0_13_X",
           "description": "Your hardware/firmware version. This corresponds to the mainboard you are using in your build.",
-          "x-environment-variable": "OM_HARDWARE_VERSION"
+          "x-environment-variable": "OM_HARDWARE_VERSION",
+          "x-source": "env",
+          "x-restart-required": "stack",
+          "x-readonly-via-ui": true
         },
         "OM_MOWER": {
           "type": "string",
@@ -32,7 +35,10 @@
           ],
           "default": "YardForce500",
           "description": "The type of mower you're using. This sets physical properties like antenna position and wheel ticks per meter. Use CUSTOM for a custom mower buiold.",
-          "x-environment-variable": "OM_MOWER"
+          "x-environment-variable": "OM_MOWER",
+          "x-source": "env",
+          "x-restart-required": "stack",
+          "x-readonly-via-ui": true
         },
         "ESC_TYPE": {
           "type": "string",
@@ -45,7 +51,10 @@
           ],
           "default": "xesc_mini",
           "description": "Select which ESC (speed controller) type you are using. Use xesc_mini if unsure.",
-          "x-environment-variable": "ESC_TYPE"
+          "x-environment-variable": "ESC_TYPE",
+          "x-source": "env",
+          "x-restart-required": "stack",
+          "x-readonly-via-ui": true
         },
         "OM_MOWER_GAMEPAD": {
           "type": "string",
@@ -60,14 +69,107 @@
           ],
           "default": "xbox360",
           "description": "Select your gamepad. The cheap ones are usually xbox360.",
-          "x-environment-variable": "OM_MOWER_GAMEPAD"
+          "x-environment-variable": "OM_MOWER_GAMEPAD",
+          "x-source": "env",
+          "x-restart-required": "stack",
+          "x-readonly-via-ui": true
         },
         "OM_IGNORE_CHARGING_CURRENT": {
           "type": "boolean",
           "default": false,
           "title": "Ignore Charging Current",
           "description": "Set to True if you're affected by a wrong IC2 sourcing. Read here https://openmower.de/docs/versions/errata/ic2-is-wrong/ for more details",
-          "x-environment-variable": "OM_IGNORE_CHARGING_CURRENT"
+          "x-environment-variable": "OM_IGNORE_CHARGING_CURRENT",
+          "x-source": "yaml-user",
+          "x-yaml-path": "mower_logic.ignore_charging_current",
+          "x-restart-required": "service"
+        }
+      }
+    },
+    "hardware_specific_settings": {
+      "title": "Hardware-Specific (Mower Geometry)",
+      "type": "object",
+      "description": "Physical properties of the selected mower chassis. Defaults come from the image-baked file 'hardware_specific/<MOWER>/params_v2.yaml'. Editing here writes a per-host override into 'mower_params.yaml' that wins the merge. Wrong values here will break driving — use the 'Reset to default' button if unsure.",
+      "properties": {
+        "antenna_offset_x": {
+          "type": "number",
+          "title": "GPS Antenna Offset X",
+          "description": "Forward offset of the GPS antenna phase center relative to base_link, in meters. Positive = antenna is in front of the rotation center.",
+          "default": 0.0,
+          "minimum": -1.0,
+          "maximum": 1.0,
+          "x-source": "yaml-hw",
+          "x-yaml-path": "xbot_positioning.antenna_offset_x",
+          "x-unit": "m",
+          "x-restart-required": "service"
+        },
+        "antenna_offset_y": {
+          "type": "number",
+          "title": "GPS Antenna Offset Y",
+          "description": "Lateral offset of the GPS antenna phase center relative to base_link, in meters. Positive = antenna is to the left of the rotation center.",
+          "default": 0.0,
+          "minimum": -1.0,
+          "maximum": 1.0,
+          "x-source": "yaml-hw",
+          "x-yaml-path": "xbot_positioning.antenna_offset_y",
+          "x-unit": "m",
+          "x-restart-required": "service"
+        },
+        "wheel_distance_m": {
+          "type": "number",
+          "title": "Wheel Distance (Track Width)",
+          "description": "Distance between the centers of the left and right driven wheels, in meters. Used by the differential-drive kinematics — wrong values will cause wrong heading estimates.",
+          "default": 0.325,
+          "minimum": 0.05,
+          "maximum": 1.5,
+          "x-source": "yaml-hw",
+          "x-yaml-path": "ll.services.diff_drive.wheel_distance_m",
+          "x-unit": "m",
+          "x-restart-required": "service"
+        },
+        "ticks_per_m": {
+          "type": "number",
+          "title": "Wheel Encoder Ticks per Meter",
+          "description": "Number of encoder ticks observed per meter of wheel travel. Calibrate by driving a measured straight line. Wrong values cause velocity/odometry drift.",
+          "default": 1600.0,
+          "minimum": 1.0,
+          "maximum": 100000.0,
+          "x-source": "yaml-hw",
+          "x-yaml-path": "ll.services.diff_drive.ticks_per_m",
+          "x-restart-required": "service"
+        },
+        "battery_critical_high_voltage": {
+          "type": "number",
+          "title": "Battery Critical High Voltage",
+          "description": "Maximum battery voltage before charging is forcibly switched off. -1 disables the limit.",
+          "default": -1,
+          "x-source": "yaml-hw",
+          "x-yaml-path": "ll.services.power.battery_critical_high_voltage",
+          "x-environment-variable": "OM_BATTERY_CRITICAL_HIGH_VOLTAGE",
+          "x-unit": "V",
+          "x-restart-required": "service"
+        },
+        "charge_critical_high_voltage": {
+          "type": "number",
+          "title": "Charge Critical High Voltage",
+          "description": "Maximum charge-rail voltage before charging is forcibly switched off. -1 disables the limit.",
+          "default": -1,
+          "x-source": "yaml-hw",
+          "x-yaml-path": "ll.services.power.charge_critical_high_voltage",
+          "x-environment-variable": "OM_CHARGE_CRITICAL_HIGH_VOLTAGE",
+          "x-unit": "V",
+          "x-restart-required": "service"
+        },
+        "charge_critical_high_current": {
+          "type": "number",
+          "title": "Charge Critical High Current",
+          "description": "Maximum charge current before charging is forcibly switched off. -1 disables the limit.",
+          "default": -1,
+          "x-source": "yaml-hw",
+          "x-yaml-path": "ll.services.power.charge_critical_high_current",
+          "x-environment-variable": "OM_CHARGE_CRITICAL_HIGH_CURRENT",
+          "x-unit": "A",
+          "x-restart-required": "service"
         }
       }
     },
@@ -84,13 +186,19 @@
               "type": "string",
               "title": "Datum Lat",
               "description": "Coordinates near your docking station.",
-              "x-environment-variable": "OM_DATUM_LAT"
+              "x-environment-variable": "OM_DATUM_LAT",
+              "x-source": "yaml-user",
+              "x-yaml-path": "ll.services.gps.datum_lat",
+              "x-restart-required": "service"
             },
             "OM_DATUM_LONG": {
               "type": "string",
               "title": "Datum Long",
               "description": "Coordinates near your docking station.",
-              "x-environment-variable": "OM_DATUM_LONG"
+              "x-environment-variable": "OM_DATUM_LONG",
+              "x-source": "yaml-user",
+              "x-yaml-path": "ll.services.gps.datum_long",
+              "x-restart-required": "service"
             }
           }
         },
@@ -103,7 +211,10 @@
               "default": true,
               "title": "Use Ntrip for receiving corrections",
               "description": "Set to False if using an external radio.",
-              "x-environment-variable": "OM_USE_NTRIP"
+              "x-environment-variable": "OM_USE_NTRIP",
+              "x-source": "env",
+              "x-restart-required": "stack",
+              "x-readonly-via-ui": true
             }
           },
           "allOf": [
@@ -122,49 +233,70 @@
                     "title": "NTRIP Hostname",
                     "description": "Hostname or IP of your NTRIP caster.",
                     "default": "your-ntrip-caster",
-                    "x-environment-variable": "OM_NTRIP_HOSTNAME"
+                    "x-environment-variable": "OM_NTRIP_HOSTNAME",
+                    "x-source": "yaml-user",
+                    "x-yaml-path": "ntrip_client.host",
+                    "x-restart-required": "service"
                   },
                   "OM_NTRIP_PORT": {
                     "type": "number",
                     "title": "NTRIP port",
                     "default": 2101,
                     "description": "Port of your NTRIP caster.",
-                    "x-environment-variable": "OM_NTRIP_PORT"
+                    "x-environment-variable": "OM_NTRIP_PORT",
+                    "x-source": "yaml-user",
+                    "x-yaml-path": "ntrip_client.port",
+                    "x-restart-required": "service"
                   },
                   "OM_NTRIP_USER": {
                     "type": "string",
                     "title": "NTRIP Username",
                     "description": "NTRIP username.",
                     "default": "gps",
-                    "x-environment-variable": "OM_NTRIP_USER"
+                    "x-environment-variable": "OM_NTRIP_USER",
+                    "x-source": "yaml-user",
+                    "x-yaml-path": "ntrip_client.username",
+                    "x-restart-required": "service"
                   },
                   "OM_NTRIP_PASSWORD": {
                     "type": "string",
                     "title": "NTRIP Password",
                     "description": "NTRIP password.",
                     "default": "gps",
-                    "x-environment-variable": "OM_NTRIP_PASSWORD"
+                    "x-environment-variable": "OM_NTRIP_PASSWORD",
+                    "x-source": "yaml-user",
+                    "x-yaml-path": "ntrip_client.password",
+                    "x-restart-required": "service"
                   },
                   "OM_NTRIP_ENDPOINT": {
                     "type": "string",
                     "title": "NTRIP Endpoint",
                     "default": "BASE1",
                     "description": "NTRIP endpoint / mount point.",
-                    "x-environment-variable": "OM_NTRIP_ENDPOINT"
+                    "x-environment-variable": "OM_NTRIP_ENDPOINT",
+                    "x-source": "yaml-user",
+                    "x-yaml-path": "ntrip_client.mountpoint",
+                    "x-restart-required": "service"
                   },
                   "OM_NTRIP_RECONNECT_WAIT_SECONDS": {
                     "type": "number",
                     "title": "NTRIP Reconnect Wait Seconds",
                     "default": "5",
                     "description": "How long in seconds the NTRIP client waits before reconnecting",
-                    "x-environment-variable": "OM_NTRIP_RECONNECT_WAIT_SECONDS"
+                    "x-environment-variable": "OM_NTRIP_RECONNECT_WAIT_SECONDS",
+                    "x-source": "yaml-user",
+                    "x-yaml-path": "ntrip_client.reconnect_attempt_wait_seconds",
+                    "x-restart-required": "service"
                   },
                   "OM_NTRIP_RECONNECT_MAX": {
                     "type": "number",
                     "title": "NTRIP Max Reconnection Attempts",
                     "default": "99999",
                     "description": "The maximum number of times the NTRIP client retries",
-                    "x-environment-variable": "OM_NTRIP_RECONNECT_MAX"
+                    "x-environment-variable": "OM_NTRIP_RECONNECT_MAX",
+                    "x-source": "yaml-user",
+                    "x-yaml-path": "ntrip_client.reconnect_attempt_max",
+                    "x-restart-required": "service"
                   }
                 }
               }
@@ -197,7 +329,10 @@
                 ],
                 "default": "UBX",
                 "description": "Protocol used by your GPS board. For u-blox devices use UBX, otherwise NMEA.",
-                "x-environment-variable": "OM_GPS_PROTOCOL"
+                "x-environment-variable": "OM_GPS_PROTOCOL",
+                "x-source": "yaml-user",
+                "x-yaml-path": "ll.services.gps.protocol",
+                "x-restart-required": "service"
               },
               "OM_GPS_DEVICE_TYPE": {
                 "title": "Device Type",
@@ -208,20 +343,29 @@
                 ],
                 "default": "serial",
                 "description": "Whether communicate with the serial port directly or via TCP port.",
-                "x-environment-variable": "OM_GPS_DEVICE_TYPE"
+                "x-environment-variable": "OM_GPS_DEVICE_TYPE",
+                "x-source": "env",
+                "x-restart-required": "stack",
+                "x-readonly-via-ui": true
               },
               "OM_USE_F9R_SENSOR_FUSION": {
                 "type": "boolean",
                 "default": false,
                 "description": "Use F9R's sensor fusion. Disable, if unsure.",
-                "x-environment-variable": "OM_USE_F9R_SENSOR_FUSION"
+                "x-environment-variable": "OM_USE_F9R_SENSOR_FUSION",
+                "x-source": "env",
+                "x-restart-required": "stack",
+                "x-readonly-via-ui": true
               },
               "OM_USE_RELATIVE_POSITION": {
                 "title": "Use Relative Position",
                 "type": "boolean",
                 "default": false,
                 "description": "True, to use Relative Positioning. If you are unsure keep at false.",
-                "x-environment-variable": "OM_USE_RELATIVE_POSITION"
+                "x-environment-variable": "OM_USE_RELATIVE_POSITION",
+                "x-source": "env",
+                "x-restart-required": "stack",
+                "x-readonly-via-ui": true
               }
             },
             "allOf": [
@@ -239,13 +383,19 @@
                       "title": "Port",
                       "type": "string",
                       "description": "Port for GPS board (/dev/...). Keep empty for default values.",
-                      "x-environment-variable": "OM_GPS_PORT"
+                      "x-environment-variable": "OM_GPS_PORT",
+                      "x-source": "env",
+                      "x-restart-required": "stack",
+                      "x-readonly-via-ui": true
                     },
                     "OM_GPS_BAUDRATE": {
                       "title": "Baud rate",
                       "type": "string",
                       "description": "Baud rate for GPS board.",
-                      "x-environment-variable": "OM_GPS_BAUDRATE"
+                      "x-environment-variable": "OM_GPS_BAUDRATE",
+                      "x-source": "yaml-user",
+                      "x-yaml-path": "ll.services.gps.baud_rate",
+                      "x-restart-required": "service"
                     }
                   }
                 },
@@ -256,14 +406,20 @@
                       "type": "string",
                       "default": "127.0.0.1",
                       "description": "Hostname to read GPS data from via TCP.",
-                      "x-environment-variable": "OM_GPS_TCP_HOSTNAME"
+                      "x-environment-variable": "OM_GPS_TCP_HOSTNAME",
+                      "x-source": "env",
+                      "x-restart-required": "stack",
+                      "x-readonly-via-ui": true
                     },
                     "OM_GPS_TCP_PORT": {
                       "title": "Port",
                       "type": "number",
                       "default": 2102,
                       "description": "Port to read GPS data from via TCP.",
-                      "x-environment-variable": "OM_GPS_TCP_PORT"
+                      "x-environment-variable": "OM_GPS_TCP_PORT",
+                      "x-source": "env",
+                      "x-restart-required": "stack",
+                      "x-readonly-via-ui": true
                     }
                   }
                 }
@@ -282,152 +438,234 @@
           "default": 1.0,
           "title": "Docking Distance",
           "description": "Distance in [m] to drive forward after docking.",
-          "x-environment-variable": "OM_DOCKING_DISTANCE"
+          "x-environment-variable": "OM_DOCKING_DISTANCE",
+          "x-source": "yaml-user",
+          "x-yaml-path": "mower_logic.docking_approach_distance",
+          "x-unit": "m",
+          "x-restart-required": "service"
         },
         "OM_DOCKING_APPROACH_DISTANCE": {
           "type": "number",
           "default": 1.5,
           "title": "Docking Approach Distance",
           "description": "Distance in [m] from the docking point to start docking. Has to be at least the length from the dock to your nav- or mow-area, otherwise docking will fail!",
-          "x-environment-variable": "OM_DOCKING_APPROACH_DISTANCE"
+          "x-environment-variable": "OM_DOCKING_APPROACH_DISTANCE",
+          "x-source": "yaml-user",
+          "x-yaml-path": "mower_logic.docking_approach_distance",
+          "x-unit": "m",
+          "x-restart-required": "service"
         },
         "OM_DOCKING_EXTRA_TIME": {
           "type": "number",
           "default": 0.0,
           "description": "Extra time in [s] to continue docking after voltage detection. This can be useful to make good contact with the base station. Use carefully.",
-          "x-environment-variable": "OM_DOCKING_EXTRA_TIME"
+          "x-environment-variable": "OM_DOCKING_EXTRA_TIME",
+          "x-source": "yaml-user",
+          "x-yaml-path": "mower_logic.docking_extra_time",
+          "x-unit": "s",
+          "x-restart-required": "service"
         },
         "OM_DOCKING_RETRY_COUNT": {
           "type": "number",
           "title": "Docking retry count",
           "default": 4,
           "description": "How many times to retry docking before giving up.",
-          "x-environment-variable": "OM_DOCKING_RETRY_COUNT"
+          "x-environment-variable": "OM_DOCKING_RETRY_COUNT",
+          "x-source": "yaml-user",
+          "x-yaml-path": "mower_logic.docking_retry_count",
+          "x-restart-required": "service"
         },
         "OM_DOCKING_REDOCK": {
           "type": "boolean",
           "title": "Docking retry count",
           "default": false,
           "description": "Whether to attempt redocking if the voltage is no longer detected after docking.",
-          "x-environment-variable": "OM_DOCKING_REDOCK"
+          "x-environment-variable": "OM_DOCKING_REDOCK",
+          "x-source": "yaml-user",
+          "x-yaml-path": "mower_logic.docking_redock",
+          "x-restart-required": "service"
         },
         "OM_DOCKING_WAIT_TIME": {
           "type": "number",
           "title": "Wait before docking",
           "default": 0,
           "description": "Time to wait (s) at OM_DOCKING_APPROACH_DISTANCE before starting to dock.",
-          "x-environment-variable": "OM_DOCKING_WAIT_TIME"
+          "x-environment-variable": "OM_DOCKING_WAIT_TIME",
+          "x-source": "yaml-user",
+          "x-yaml-path": "mower_logic.docking_wait_time",
+          "x-unit": "s",
+          "x-restart-required": "service"
         },
         "OM_UNDOCKING_WAIT_TIME": {
           "type": "number",
           "title": "Wait before undocking",
           "default": 0,
           "description": "Time to wait in dock (s) before before starting to undock",
-          "x-environment-variable": "OM_UNDOCKING_WAIT_TIME"
+          "x-environment-variable": "OM_UNDOCKING_WAIT_TIME",
+          "x-source": "yaml-user",
+          "x-yaml-path": "mower_logic.undocking_wait_time",
+          "x-unit": "s",
+          "x-restart-required": "service"
         },
         "OM_UNDOCK_DISTANCE": {
           "type": "number",
           "title": "Undock Distance",
           "default": 2.0,
           "description": "Distance in [m] to drive for undocking.",
-          "x-environment-variable": "OM_UNDOCK_DISTANCE"
+          "x-environment-variable": "OM_UNDOCK_DISTANCE",
+          "x-source": "yaml-user",
+          "x-yaml-path": "mower_logic.undock_distance",
+          "x-unit": "m",
+          "x-restart-required": "service"
         },
         "OM_UNDOCK_ANGLED_DISTANCE": {
           "type": "number",
           "title": "Undock Angled Distance",
           "default": 0.0,
           "description": "Distance in [m] to continue driving at an angle for undocking.",
-          "x-environment-variable": "OM_UNDOCK_ANGLED_DISTANCE"
+          "x-environment-variable": "OM_UNDOCK_ANGLED_DISTANCE",
+          "x-source": "yaml-user",
+          "x-yaml-path": "mower_logic.undock_angled_distance",
+          "x-unit": "m",
+          "x-restart-required": "service"
         },
         "OM_UNDOCK_ANGLE": {
           "type": "number",
           "title": "Undock Angle",
           "default": 0.0,
           "description": "Angle in degrees for second stage undocking.",
-          "x-environment-variable": "OM_UNDOCK_ANGLE"
+          "x-environment-variable": "OM_UNDOCK_ANGLE",
+          "x-source": "yaml-user",
+          "x-yaml-path": "mower_logic.undock_angle",
+          "x-unit": "deg",
+          "x-restart-required": "service"
         },
         "OM_UNDOCK_FIXED_ANGLE": {
           "type": "boolean",
           "title": "Undock Fixed Angle",
           "default": true,
           "description": "True to fix the undock angle, false to vary it.",
-          "x-environment-variable": "OM_UNDOCK_FIXED_ANGLE"
+          "x-environment-variable": "OM_UNDOCK_FIXED_ANGLE",
+          "x-source": "yaml-user",
+          "x-yaml-path": "mower_logic.undock_fixed_angle",
+          "x-restart-required": "service"
         },
         "OM_UNDOCK_USE_CURVE": {
           "type": "boolean",
           "title": "Undock Use Curve",
           "default": true,
           "description": "True to use a curved second stage, false for a straight second stage.",
-          "x-environment-variable": "OM_UNDOCK_USE_CURVE"
+          "x-environment-variable": "OM_UNDOCK_USE_CURVE",
+          "x-source": "yaml-user",
+          "x-yaml-path": "mower_logic.undock_use_curve",
+          "x-restart-required": "service"
         },
         "OM_OUTLINE_COUNT": {
           "type": "number",
           "default": 4,
           "description": "How many outlines should the mover drive. It's not recommended to set this below 4.",
-          "x-environment-variable": "OM_OUTLINE_COUNT"
+          "x-environment-variable": "OM_OUTLINE_COUNT",
+          "x-source": "yaml-user",
+          "x-yaml-path": "mower_logic.outline_count",
+          "x-restart-required": "service"
         },
         "OM_TOOL_WIDTH": {
           "type": "number",
           "title": "Mowing Tool Width",
           "default": 0.13,
           "description": "Width of mowing paths in [m]. Use smaller values for more overlap.",
-          "x-environment-variable": "OM_TOOL_WIDTH"
+          "x-environment-variable": "OM_TOOL_WIDTH",
+          "x-source": "yaml-user",
+          "x-yaml-path": "mower_logic.tool_width",
+          "x-unit": "m",
+          "x-restart-required": "service"
         },
         "OM_BATTERY_FULL_VOLTAGE": {
           "type": "number",
           "title": "Battery Full Voltage",
           "default": 28.5,
           "description": "Voltage for battery to be considered full.",
-          "x-environment-variable": "OM_BATTERY_FULL_VOLTAGE"
+          "x-environment-variable": "OM_BATTERY_FULL_VOLTAGE",
+          "x-source": "yaml-user",
+          "x-yaml-path": "ll.services.power.battery_full_voltage",
+          "x-unit": "V",
+          "x-restart-required": "service"
         },
         "OM_BATTERY_EMPTY_VOLTAGE": {
           "type": "number",
           "default": 24.0,
           "title": "Battery Empty Voltage",
           "description": "Dock if voltage remains below empty for 20s.",
-          "x-environment-variable": "OM_BATTERY_EMPTY_VOLTAGE"
+          "x-environment-variable": "OM_BATTERY_EMPTY_VOLTAGE",
+          "x-source": "yaml-user",
+          "x-yaml-path": "ll.services.power.battery_empty_voltage",
+          "x-unit": "V",
+          "x-restart-required": "service"
         },
         "OM_BATTERY_CRITICAL_VOLTAGE": {
           "type": "number",
           "default": 23.0,
           "title": "Battery Critical Voltage",
           "description": "Immediate dock if voltage is critical.",
-          "x-environment-variable": "OM_BATTERY_CRITICAL_VOLTAGE"
+          "x-environment-variable": "OM_BATTERY_CRITICAL_VOLTAGE",
+          "x-source": "yaml-user",
+          "x-yaml-path": "ll.services.power.battery_critical_voltage",
+          "x-unit": "V",
+          "x-restart-required": "service"
         },
         "OM_MOWING_MOTOR_TEMP_HIGH": {
           "type": "number",
           "default": 80.0,
           "title": "Mower max. Temperature",
           "description": "Motor temperature to stop mowing and wait for cooldown. This value is in deg. C.",
-          "x-environment-variable": "OM_MOWING_MOTOR_TEMP_HIGH"
+          "x-environment-variable": "OM_MOWING_MOTOR_TEMP_HIGH",
+          "x-source": "yaml-user",
+          "x-yaml-path": "mower_logic.mowing_motor_temp_high",
+          "x-unit": "°C",
+          "x-restart-required": "service"
         },
         "OM_MOWING_MOTOR_TEMP_LOW": {
           "type": "number",
           "default": 40.0,
           "title": "Mower low Temperature",
           "description": "After reaching the max temperature, mowing will be paused until the mower temperature is above this value. This value is in deg. C.",
-          "x-environment-variable": "OM_MOWING_MOTOR_TEMP_LOW"
+          "x-environment-variable": "OM_MOWING_MOTOR_TEMP_LOW",
+          "x-source": "yaml-user",
+          "x-yaml-path": "mower_logic.mowing_motor_temp_low",
+          "x-unit": "°C",
+          "x-restart-required": "service"
         },
         "OM_GPS_WAIT_TIME_SEC": {
           "type": "number",
           "default": 10.0,
           "title": "GPS Wait Time",
           "description": "Additional wait time in [s] after undocking. Increase this value, if you get inconsistent fixes after undocking.",
-          "x-environment-variable": "OM_GPS_WAIT_TIME_SEC"
+          "x-environment-variable": "OM_GPS_WAIT_TIME_SEC",
+          "x-source": "yaml-user",
+          "x-yaml-path": "mower_logic.gps_wait_time",
+          "x-unit": "s",
+          "x-restart-required": "service"
         },
         "OM_GPS_TIMEOUT_SEC": {
           "type": "number",
           "default": 5.0,
           "title": "GPS Timeout",
           "description": "Timeout for GPS in [s]. Mowing will pause, if no GPS update was received within this configured time.",
-          "x-environment-variable": "OM_GPS_TIMEOUT_SEC"
+          "x-environment-variable": "OM_GPS_TIMEOUT_SEC",
+          "x-source": "yaml-user",
+          "x-yaml-path": "mower_logic.gps_timeout",
+          "x-unit": "s",
+          "x-restart-required": "service"
         },
         "OM_ENABLE_MOWER": {
           "type": "boolean",
           "default": false,
           "title": "Enable Mowing Motor",
           "description": "Enable mowing motor. Set to false for testing.",
-          "x-environment-variable": "OM_ENABLE_MOWER"
+          "x-environment-variable": "OM_ENABLE_MOWER",
+          "x-source": "yaml-user",
+          "x-yaml-path": "mower_logic.enable_mower",
+          "x-restart-required": "service"
         },
         "OM_AUTOMATIC_MODE": {
           "type": "string",
@@ -440,6 +678,9 @@
           "title": "Automatic Mode",
           "description": "Automatic start value.",
           "x-environment-variable": "OM_AUTOMATIC_MODE",
+          "x-source": "yaml-user",
+          "x-yaml-path": "mower_logic.automatic_mode",
+          "x-restart-required": "service",
           "x-remap-values": {
             "MANUAL": 0,
             "SEMIAUTO": 1,
@@ -451,14 +692,21 @@
           "default": 0.05,
           "title": "Mowing Outline Offset",
           "description": "Offset to be applied to the recorded outline. Positive values move the outline inwards (i.e. safety margin).",
-          "x-environment-variable": "OM_OUTLINE_OFFSET"
+          "x-environment-variable": "OM_OUTLINE_OFFSET",
+          "x-source": "yaml-user",
+          "x-yaml-path": "mower_logic.outline_offset",
+          "x-unit": "m",
+          "x-restart-required": "service"
         },
         "OM_ENABLE_RECORDING_ALL": {
           "type": "boolean",
           "default": false,
           "title": "Enable Recording",
           "description": "Set to true to record your session for debugging. Recordings will be stored in $HOME. Only enable for testing, otherwise your SD card will get full soon.",
-          "x-environment-variable": "OM_ENABLE_RECORDING_ALL"
+          "x-environment-variable": "OM_ENABLE_RECORDING_ALL",
+          "x-source": "env",
+          "x-restart-required": "stack",
+          "x-readonly-via-ui": true
         },
         "OM_SNAPSHOT_MEMORY_PER_TOPIC": {
           "type": "number",
@@ -466,6 +714,10 @@
           "title": "Snapshot Buffer Memory per Topic",
           "description": "Sets the maximum memory used per topic (in MB) by the Snapshot Buffer. The Snapshot Buffer stores a recent history of all messages sent, and can be dumped to disk using save_snapshot.sh. It is independent of OM_ENABLE_RECORDING",
           "x-environment-variable": "OM_SNAPSHOT_MEMORY_PER_TOPIC",
+          "x-source": "env",
+          "x-unit": "MB",
+          "x-restart-required": "stack",
+          "x-readonly-via-ui": true,
           "examples": [
             5.0
           ]
@@ -475,7 +727,11 @@
           "default": 1200,
           "title": "Snapshot Buffer ",
           "description": "Sets the maximum age (in seconds) of messages to store in the Snapshot Buffer. The Snapshot Buffer stores a recent history of all messages sent, and can be dumped to disk using save_snapshot.sh. It is independent of OM_ENABLE_RECORDING",
-          "x-environment-variable": "OM_SNAPSHOT_DURATION"
+          "x-environment-variable": "OM_SNAPSHOT_DURATION",
+          "x-source": "env",
+          "x-unit": "s",
+          "x-restart-required": "stack",
+          "x-readonly-via-ui": true
         },
         "OM_RAIN_MODE": {
           "type": "string",
@@ -489,6 +745,9 @@
           "title": "Rain Mode",
           "description": "Behaviour when rain detected",
           "x-environment-variable": "OM_RAIN_MODE",
+          "x-source": "yaml-user",
+          "x-yaml-path": "mower_logic.rain_mode",
+          "x-restart-required": "service",
           "x-remap-values": {
             "Ignore": 0,
             "Dock": 1,
@@ -501,7 +760,11 @@
           "default": 30,
           "title": "Rain delay minutes",
           "description": "How long to wait after rain to resume mowing when mode is \"Dock Until Dry\" (minimum value is 30)",
-          "x-environment-variable": "OM_RAIN_DELAY_MINUTES"
+          "x-environment-variable": "OM_RAIN_DELAY_MINUTES",
+          "x-source": "yaml-user",
+          "x-yaml-path": "mower_logic.rain_delay_minutes",
+          "x-unit": "min",
+          "x-restart-required": "service"
         },
         "advanced": {
           "type": "boolean",
@@ -523,87 +786,330 @@
                 "type": "number",
                 "default": 0,
                 "description": "Number of outlines to overlap.",
-                "x-environment-variable": "OM_OUTLINE_OVERLAP_COUNT"
+                "x-environment-variable": "OM_OUTLINE_OVERLAP_COUNT",
+                "x-source": "yaml-user",
+                "x-yaml-path": "mower_logic.outline_overlap_count",
+                "x-restart-required": "service"
               },
               "OM_MOWING_ANGLE_OFFSET": {
                 "type": "number",
                 "default": 0,
                 "description": "Mowing angle offset -180 deg - +180 deg, 0 = east, -90 = north. If mowing angle offset is not absolute it gets added to the auto detected angle which is set by the first 2 m of recorded outline.",
-                "x-environment-variable": "OM_MOWING_ANGLE_OFFSET"
+                "x-environment-variable": "OM_MOWING_ANGLE_OFFSET",
+                "x-source": "yaml-user",
+                "x-yaml-path": "mower_logic.mow_angle_offset",
+                "x-unit": "deg",
+                "x-restart-required": "service"
               },
               "OM_MOWING_ANGLE_OFFSET_IS_ABSOLUTE": {
                 "type": "boolean",
                 "default": false,
                 "description": "If mowing angle offset is absolute.",
-                "x-environment-variable": "OM_MOWING_ANGLE_OFFSET_IS_ABSOLUTE"
+                "x-environment-variable": "OM_MOWING_ANGLE_OFFSET_IS_ABSOLUTE",
+                "x-source": "yaml-user",
+                "x-yaml-path": "mower_logic.mow_angle_offset_is_absolute",
+                "x-restart-required": "service"
               },
               "OM_MOWING_ANGLE_INCREMENT": {
                 "type": "number",
                 "default": 0,
                 "description": "The increment value will automatically add specified number of degrees to the mowing angle everytime the whole map is finished",
-                "x-environment-variable": "OM_MOWING_ANGLE_INCREMENT"
+                "x-environment-variable": "OM_MOWING_ANGLE_INCREMENT",
+                "x-source": "yaml-user",
+                "x-yaml-path": "mower_logic.mow_angle_increment",
+                "x-unit": "deg",
+                "x-restart-required": "service"
               },
               "OM_PERIMETER_SIGNAL": {
                 "type": "number",
                 "description": "Use perimeter sensor for docking. Set to 1 or 2 depending on the signal selected on the docking station. This is only supported by Mowgli builds for now.",
-                "x-environment-variable": "OM_PERIMETER_SIGNAL"
+                "x-environment-variable": "OM_PERIMETER_SIGNAL",
+                "x-source": "env",
+                "x-restart-required": "stack",
+                "x-readonly-via-ui": true
               },
               "OM_EMERGENCY_INPUT_CONFIG": {
                 "type": "string",
                 "default": "",
                 "description": "Comma separated list of emergency inputs (halls or stop), where each sensor can be configured in one of the following modes '[!]<I>gnore|<U>nused|<S>top|<L>Lift'",
-                "x-environment-variable": "OM_EMERGENCY_INPUT_CONFIG"
+                "x-environment-variable": "OM_EMERGENCY_INPUT_CONFIG",
+                "x-source": "env",
+                "x-restart-required": "stack",
+                "x-readonly-via-ui": true
               },
               "OM_EMERGENCY_LIFT_PERIOD": {
                 "type": "number",
                 "default": -1,
                 "description": "Period (ms) for >=2 wheels to be lifted in order to count as emergency (0 = disable)",
-                "x-environment-variable": "OM_EMERGENCY_LIFT_PERIOD"
+                "x-environment-variable": "OM_EMERGENCY_LIFT_PERIOD",
+                "x-source": "yaml-user",
+                "x-yaml-path": "mower_logic.emergency_lift_period",
+                "x-unit": "ms",
+                "x-restart-required": "service"
               },
               "OM_EMERGENCY_TILT_PERIOD": {
                 "type": "number",
                 "default": -1,
                 "description": "Period (ms) for a single wheel to be lifted in order to count as emergency (0 = disable)",
-                "x-environment-variable": "OM_EMERGENCY_TILT_PERIOD"
+                "x-environment-variable": "OM_EMERGENCY_TILT_PERIOD",
+                "x-source": "yaml-user",
+                "x-yaml-path": "mower_logic.emergency_tilt_period",
+                "x-unit": "ms",
+                "x-restart-required": "service"
               },
               "OM_SHUTDOWN_ESC_MAX_PITCH": {
                 "type": "number",
                 "default": 0,
                 "description": "Maximum pitch angle (deg) where ESC shutdown is permitted (0 to disable ESC shutdown)",
-                "x-environment-variable": "OM_SHUTDOWN_ESC_MAX_PITCH"
+                "x-environment-variable": "OM_SHUTDOWN_ESC_MAX_PITCH",
+                "x-source": "yaml-user",
+                "x-yaml-path": "mower_logic.shutdown_esc_max_pitch",
+                "x-unit": "deg",
+                "x-restart-required": "service"
               },
               "OM_CU_RAIN_THRESHOLD": {
                 "type": "number",
                 "default": -1,
                 "title": "Stock-CoverUI rain sensor threshold",
                 "description": "Stock-CoverUI limited rain sensor threshold, below which humidity/dryness value get identified as rain. As higher, as more dry. Default to 700",
-                "x-environment-variable": "OM_CU_RAIN_THRESHOLD"
+                "x-environment-variable": "OM_CU_RAIN_THRESHOLD",
+                "x-source": "yaml-user",
+                "x-yaml-path": "mower_logic.cu_rain_threshold",
+                "x-restart-required": "service"
               },
               "OM_BATTERY_CRITICAL_HIGH_VOLTAGE": {
                 "type": "number",
                 "default": -1,
                 "title": "Max. battery voltage",
                 "description": "Max. battery voltage before charging get switched off",
-                "x-environment-variable": "OM_BATTERY_CRITICAL_HIGH_VOLTAGE"
+                "x-environment-variable": "OM_BATTERY_CRITICAL_HIGH_VOLTAGE",
+                "x-source": "yaml-user",
+                "x-yaml-path": "ll.services.power.battery_critical_high_voltage",
+                "x-unit": "V",
+                "x-restart-required": "service"
               },
               "OM_CHARGE_CRITICAL_HIGH_VOLTAGE": {
                 "type": "number",
                 "default": -1,
                 "title": "Max. charge voltage",
                 "description": "Max. charge voltage before charging get switched off",
-                "x-environment-variable": "OM_CHARGE_CRITICAL_HIGH_VOLTAGE"
+                "x-environment-variable": "OM_CHARGE_CRITICAL_HIGH_VOLTAGE",
+                "x-source": "yaml-user",
+                "x-yaml-path": "ll.services.power.charge_critical_high_voltage",
+                "x-unit": "V",
+                "x-restart-required": "service"
               },
               "OM_CHARGE_CRITICAL_HIGH_CURRENT": {
                 "type": "number",
                 "default": -1,
                 "title": "Max. charge current",
                 "description": "Max. charge current before charging get switched off",
-                "x-environment-variable": "OM_CHARGE_CRITICAL_HIGH_CURRENT"
+                "x-environment-variable": "OM_CHARGE_CRITICAL_HIGH_CURRENT",
+                "x-source": "yaml-user",
+                "x-yaml-path": "ll.services.power.charge_critical_high_current",
+                "x-unit": "A",
+                "x-restart-required": "service"
               }
             }
           }
         }
       ]
+    },
+    "motion_control": {
+      "title": "Motion Control (Advanced)",
+      "type": "object",
+      "description": "Live tuning of the FTC local planner running inside move_base_flex. Changes take effect immediately via dynamic_reconfigure — no restart needed. Wrong values can cause the mower to oscillate or veer off path.",
+      "properties": {
+        "kp_lat": {
+          "type": "number",
+          "title": "Kp Lateral",
+          "description": "Proportional gain on lateral cross-track error. Higher = stronger correction back to path; too high causes oscillation.",
+          "default": 25.0,
+          "minimum": 0.0,
+          "x-source": "ros",
+          "x-ros-param": "/move_base_flex/FTCPlanner/kp_lat",
+          "x-restart-required": "none"
+        },
+        "ki_lat": {
+          "type": "number",
+          "title": "Ki Lateral",
+          "description": "Integral gain on lateral cross-track error.",
+          "default": 0.06153,
+          "minimum": 0.0,
+          "x-source": "ros",
+          "x-ros-param": "/move_base_flex/FTCPlanner/ki_lat",
+          "x-restart-required": "none"
+        },
+        "kd_lat": {
+          "type": "number",
+          "title": "Kd Lateral",
+          "description": "Derivative gain on lateral cross-track error.",
+          "default": 1.23,
+          "minimum": 0.0,
+          "x-source": "ros",
+          "x-ros-param": "/move_base_flex/FTCPlanner/kd_lat",
+          "x-restart-required": "none"
+        },
+        "kp_ang": {
+          "type": "number",
+          "title": "Kp Angular",
+          "description": "Proportional gain on heading error.",
+          "default": 3.0,
+          "minimum": 0.0,
+          "x-source": "ros",
+          "x-ros-param": "/move_base_flex/FTCPlanner/kp_ang",
+          "x-restart-required": "none"
+        },
+        "max_cmd_vel_speed": {
+          "type": "number",
+          "title": "Max Linear Velocity",
+          "description": "Upper bound on commanded linear velocity (m/s).",
+          "default": 1.0,
+          "minimum": 0.0,
+          "maximum": 5.0,
+          "x-source": "ros",
+          "x-ros-param": "/move_base_flex/FTCPlanner/max_cmd_vel_speed",
+          "x-unit": "m/s",
+          "x-restart-required": "none"
+        },
+        "max_cmd_vel_ang": {
+          "type": "number",
+          "title": "Max Angular Velocity",
+          "description": "Upper bound on commanded angular velocity (rad/s).",
+          "default": 3.1,
+          "minimum": 0.0,
+          "maximum": 10.0,
+          "x-source": "ros",
+          "x-ros-param": "/move_base_flex/FTCPlanner/max_cmd_vel_ang",
+          "x-unit": "rad/s",
+          "x-restart-required": "none"
+        },
+        "speed_slow": {
+          "type": "number",
+          "title": "Slow Speed",
+          "description": "Slow target velocity used during fine maneuvers.",
+          "default": 0.15,
+          "minimum": 0.0,
+          "x-source": "ros",
+          "x-ros-param": "/move_base_flex/FTCPlanner/speed_slow",
+          "x-unit": "m/s",
+          "x-restart-required": "none"
+        },
+        "speed_fast": {
+          "type": "number",
+          "title": "Fast Speed",
+          "description": "Fast target velocity used on long straights.",
+          "default": 0.4,
+          "minimum": 0.0,
+          "x-source": "ros",
+          "x-ros-param": "/move_base_flex/FTCPlanner/speed_fast",
+          "x-unit": "m/s",
+          "x-restart-required": "none"
+        },
+        "max_goal_distance_error": {
+          "type": "number",
+          "title": "Max Goal Distance Error",
+          "description": "Acceptable end-of-path position error.",
+          "default": 0.2,
+          "minimum": 0.0,
+          "x-source": "ros",
+          "x-ros-param": "/move_base_flex/FTCPlanner/max_goal_distance_error",
+          "x-unit": "m",
+          "x-restart-required": "none"
+        },
+        "max_goal_angle_error": {
+          "type": "number",
+          "title": "Max Goal Angle Error",
+          "description": "Acceptable end-of-path heading error.",
+          "default": 20.0,
+          "minimum": 0.0,
+          "x-source": "ros",
+          "x-ros-param": "/move_base_flex/FTCPlanner/max_goal_angle_error",
+          "x-unit": "deg",
+          "x-restart-required": "none"
+        }
+      }
+    },
+    "localization": {
+      "title": "Localization (Advanced)",
+      "type": "object",
+      "description": "Tuning of the GPS / EKF fusion. Changes take effect immediately via ros::param.",
+      "properties": {
+        "max_gps_accuracy": {
+          "type": "number",
+          "title": "Max Accepted GPS Accuracy",
+          "description": "Reject GPS samples with reported accuracy worse than this (meters). Lower = stricter.",
+          "default": 0.2,
+          "minimum": 0.0,
+          "maximum": 5.0,
+          "x-source": "ros",
+          "x-ros-param": "/xbot_positioning/max_gps_accuracy",
+          "x-unit": "m",
+          "x-restart-required": "none"
+        },
+        "debug": {
+          "type": "boolean",
+          "title": "Positioning Debug",
+          "description": "Enable verbose positioning debug output.",
+          "default": false,
+          "x-source": "ros",
+          "x-ros-param": "/xbot_positioning/debug",
+          "x-restart-required": "none"
+        }
+      }
+    },
+    "navigation": {
+      "title": "Navigation (Advanced)",
+      "type": "object",
+      "description": "Move Base Flex orchestration. The frequencies trade off CPU load against responsiveness.",
+      "properties": {
+        "controller_frequency": {
+          "type": "number",
+          "title": "Controller Frequency",
+          "description": "Rate at which the local controller is invoked.",
+          "default": 1.0,
+          "minimum": 0.1,
+          "maximum": 50.0,
+          "x-source": "ros",
+          "x-ros-param": "/move_base_flex/controller_frequency",
+          "x-unit": "Hz",
+          "x-restart-required": "none"
+        },
+        "planner_frequency": {
+          "type": "number",
+          "title": "Planner Frequency",
+          "description": "Rate at which the global planner is invoked.",
+          "default": 1.0,
+          "minimum": 0.1,
+          "maximum": 50.0,
+          "x-source": "ros",
+          "x-ros-param": "/move_base_flex/planner_frequency",
+          "x-unit": "Hz",
+          "x-restart-required": "none"
+        },
+        "oscillation_timeout": {
+          "type": "number",
+          "title": "Oscillation Timeout",
+          "description": "Time after which suspected oscillation triggers recovery.",
+          "default": 10.0,
+          "minimum": 0.0,
+          "x-source": "ros",
+          "x-ros-param": "/move_base_flex/oscillation_timeout",
+          "x-unit": "s",
+          "x-restart-required": "none"
+        },
+        "oscillation_distance": {
+          "type": "number",
+          "title": "Oscillation Distance",
+          "description": "Minimum distance considered as 'progress' before reset.",
+          "default": 0.2,
+          "minimum": 0.0,
+          "x-source": "ros",
+          "x-ros-param": "/move_base_flex/oscillation_distance",
+          "x-unit": "m",
+          "x-restart-required": "none"
+        }
+      }
     },
     "external_mqtt_broker": {
       "title": "External MQTT Broker",
@@ -614,37 +1120,55 @@
           "type": "boolean",
           "title": "Enable MQTT Publisher",
           "description": "Enable publishing to the external MQTT broker.",
-          "x-environment-variable": "OM_MQTT_ENABLE"
+          "x-environment-variable": "OM_MQTT_ENABLE",
+          "x-source": "yaml-user",
+          "x-yaml-path": "xbot_monitoring.external_mqtt_enable",
+          "x-restart-required": "service"
         },
         "OM_MQTT_HOSTNAME": {
           "type": "string",
           "title": "MQTT Broker Hostname",
           "description": "MQTT broker hostname or IP address.",
-          "x-environment-variable": "OM_MQTT_HOSTNAME"
+          "x-environment-variable": "OM_MQTT_HOSTNAME",
+          "x-source": "yaml-user",
+          "x-yaml-path": "xbot_monitoring.external_mqtt_hostname",
+          "x-restart-required": "service"
         },
         "OM_MQTT_PORT": {
           "type": "number",
           "title": "MQTT Broker Port",
           "description": "MQTT broker port.",
-          "x-environment-variable": "OM_MQTT_PORT"
+          "x-environment-variable": "OM_MQTT_PORT",
+          "x-source": "yaml-user",
+          "x-yaml-path": "xbot_monitoring.external_mqtt_port",
+          "x-restart-required": "service"
         },
         "OM_MQTT_USER": {
           "type": "string",
           "title": "MQTT Broker Username",
           "description": "MQTT broker user.",
-          "x-environment-variable": "OM_MQTT_USER"
+          "x-environment-variable": "OM_MQTT_USER",
+          "x-source": "yaml-user",
+          "x-yaml-path": "xbot_monitoring.external_mqtt_username",
+          "x-restart-required": "service"
         },
         "OM_MQTT_PASSWORD": {
           "type": "string",
           "title": "MQTT Broker Password",
           "description": "MQTT broker password.",
-          "x-environment-variable": "OM_MQTT_PASSWORD"
+          "x-environment-variable": "OM_MQTT_PASSWORD",
+          "x-source": "yaml-user",
+          "x-yaml-path": "xbot_monitoring.external_mqtt_password",
+          "x-restart-required": "service"
         },
         "OM_MQTT_TOPIC_PREFIX": {
           "type": "string",
           "title": "MQTT Topic Prefix",
           "description": "MQTT topic prefix.",
-          "x-environment-variable": "OM_MQTT_TOPIC_PREFIX"
+          "x-environment-variable": "OM_MQTT_TOPIC_PREFIX",
+          "x-source": "yaml-user",
+          "x-yaml-path": "xbot_monitoring.external_mqtt_topic_prefix",
+          "x-restart-required": "service"
         }
       }
     },
@@ -658,7 +1182,10 @@
           "title": "DFPlayer is set to 5V",
           "description": "Enable if DFPlayer is set to 5V. Important: ONLY enable this, if you are sure that you have done the required modification. Otherwise you might break your Raspberry Pi Pico.",
           "default": false,
-          "x-environment-variable": "OM_DFP_IS_5V"
+          "x-environment-variable": "OM_DFP_IS_5V",
+          "x-source": "yaml-user",
+          "x-yaml-path": "ll.services.sound.dfp_is_5v",
+          "x-restart-required": "service"
         },
         "OM_LANGUAGE": {
           "type": "string",
@@ -668,20 +1195,29 @@
           ],
           "description": "Language as ISO-639-1 code string. This is use for sound output.",
           "default": "en",
-          "x-environment-variable": "OM_LANGUAGE"
+          "x-environment-variable": "OM_LANGUAGE",
+          "x-source": "yaml-user",
+          "x-yaml-path": "ll.services.sound.language",
+          "x-restart-required": "service"
         },
         "OM_VOLUME": {
           "type": "number",
           "description": "Sound volume (0-100 or -1). -1 means the volume is managed by the CoverUI.",
           "default": -1,
-          "x-environment-variable": "OM_VOLUME"
+          "x-environment-variable": "OM_VOLUME",
+          "x-source": "yaml-user",
+          "x-yaml-path": "ll.services.sound.volume",
+          "x-restart-required": "service"
         },
         "OM_BACKGROUND_SOUNDS": {
           "type": "boolean",
           "title": "Also play background sounds",
           "description": "Enable if DFPlayer shall also play background-sounds (beside the informational advert sounds)",
           "default": false,
-          "x-environment-variable": "OM_BACKGROUND_SOUNDS"
+          "x-environment-variable": "OM_BACKGROUND_SOUNDS",
+          "x-source": "yaml-user",
+          "x-yaml-path": "ll.services.sound.background_sounds",
+          "x-restart-required": "service"
         }
       }
     },

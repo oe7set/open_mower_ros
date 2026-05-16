@@ -276,6 +276,31 @@ static const json& load_mapping_cached() {
     return mapping_cache;
 }
 
+// Cache of the schema-derived leaf index. Built once on first use; the schema
+// itself is already cached above so the work here is a single tree walk.
+static std::mutex leaf_index_cache_mutex;
+static std::unique_ptr<xbot_monitoring::config_io::SchemaLeafIndex> leaf_index_cache;
+
+static const xbot_monitoring::config_io::SchemaLeafIndex& load_leaf_index_cached() {
+    std::lock_guard<std::mutex> lk(leaf_index_cache_mutex);
+    if (!leaf_index_cache) {
+        leaf_index_cache = std::make_unique<xbot_monitoring::config_io::SchemaLeafIndex>(
+            xbot_monitoring::config_io::collect_schema_leaves(load_schema_cached()));
+    }
+    return *leaf_index_cache;
+}
+
+// Resolve the path to the Docker-Compose .env file holding the OM_* /
+// HARDWARE_PLATFORM-style hardware identifiers. The OpenMowerOS image puts
+// it at /opt/stacks/openmower/.env; sandboxed runs can override it via the
+// ~env_file_path ROS param.
+static std::string get_env_file_path() {
+    std::string path;
+    ros::param::param<std::string>("~env_file_path", path,
+                                   std::string("/opt/stacks/openmower/.env"));
+    return path;
+}
+
 // Read all three YAML layers (image-baked defaults, hardware-specific
 // defaults selected by the MOWER env var, host-mounted user override) and
 // deep-merge them so the frontend sees the same effective values the running
@@ -487,17 +512,66 @@ xbot_rpc::RpcProvider rpc_provider("xbot_monitoring", {{
         }
     }),
     RPC_METHOD("meta.config.get", {
-        // Reads the merged YAML config (defaults + user-override) and projects
-        // it back into the OM_*-keyed map the frontend expects via the YAML
-        // mapping JSON. Keys mapped to null (read-only hardware identifiers)
-        // are skipped silently.
+        // Builds a flat snapshot the frontend can use to populate the form.
+        // Three sources are merged:
+        //   * yaml-user / yaml-hw fields → looked up by their dotted YAML
+        //     path inside the merged YAML config (defaults + HW + user).
+        //   * env fields → looked up in /opt/stacks/openmower/.env (the
+        //     Docker-Compose env file holding hardware identifiers).
+        //   * legacy OM_* fields without an x-yaml-path / x-source still get
+        //     resolved via mower_config.yaml_mapping.json so older deployments
+        //     keep working.
+        // Keys are emitted under both their OM_* name (when known) and their
+        // x-yaml-path (when known); the frontend picks whichever it sent.
         try {
             const json& mapping = load_mapping_cached();
+            const auto& leaves = load_leaf_index_cached();
             json merged = read_merged_yaml_config();
+
+            json env_snapshot = json::object();
+            try {
+                env_snapshot = xbot_monitoring::config_io::read_env_file(get_env_file_path());
+            } catch (const std::exception& e) {
+                ROS_WARN_STREAM("meta.config.get: failed to read env file: " << e.what());
+            }
+
             json out = json::object();
+
+            // Schema-driven projection — covers new yaml-path-only fields, ENV
+            // fields, and legacy OM_* fields with x-source set.
+            for (const auto& leaf : leaves.all) {
+                json value;
+                bool have_value = false;
+                if (leaf.source == "env") {
+                    if (!leaf.env_var.empty() && env_snapshot.contains(leaf.env_var)) {
+                        value = env_snapshot[leaf.env_var];
+                        have_value = true;
+                    }
+                } else if (leaf.source == "yaml-user" || leaf.source == "yaml-hw") {
+                    if (!leaf.yaml_path.empty()) {
+                        const json* v = xbot_monitoring::yaml_io::read_path(merged, leaf.yaml_path);
+                        if (v) {
+                            value = *v;
+                            have_value = true;
+                        }
+                    }
+                }
+                if (!have_value) continue;
+                if (!leaf.env_var.empty()) {
+                    out[leaf.env_var] = value;
+                }
+                if (!leaf.yaml_path.empty()) {
+                    out[leaf.yaml_path] = value;
+                }
+            }
+
+            // Legacy fallback: any OM_* key in the mapping JSON that the schema
+            // walker didn't already cover (e.g. fields without x-source) still
+            // gets projected via the mapping path.
             for (auto it = mapping.begin(); it != mapping.end(); ++it) {
-                if (it.key().rfind("_", 0) == 0) continue;  // skip _comment etc.
-                if (!it.value().is_string()) continue;       // null mapping → not editable
+                if (it.key().rfind("_", 0) == 0) continue;
+                if (!it.value().is_string()) continue;
+                if (out.contains(it.key())) continue;
                 const std::string yaml_path = it.value().get<std::string>();
                 const json* v = xbot_monitoring::yaml_io::read_path(merged, yaml_path);
                 if (v) out[it.key()] = *v;
@@ -527,28 +601,56 @@ xbot_rpc::RpcProvider rpc_provider("xbot_monitoring", {{
             // the same on-disk state and clobber our update.
             std::lock_guard<std::mutex> config_lk(config_write_mutex);
             const json& mapping = load_mapping_cached();
+            const auto& leaves = load_leaf_index_cached();
             const std::string user_path = get_user_yaml_path();
             json user_yaml = xbot_monitoring::yaml_io::read_yaml_file(user_path);
 
             json updated_keys = json::array();
             json skipped_keys = json::array();
             for (auto it = changes.begin(); it != changes.end(); ++it) {
-                const std::string& om_key = it.key();
-                if (!mapping.contains(om_key)) {
-                    skipped_keys.push_back(om_key);
+                const std::string& key = it.key();
+
+                // Resolve the change key against three indexes, in priority
+                // order: schema-leaf-by-env-var (legacy + new),
+                // schema-leaf-by-yaml-path (new yaml-path-only fields),
+                // legacy mapping JSON (catch-all). The first match wins.
+                const xbot_monitoring::config_io::SchemaLeaf* leaf = nullptr;
+                if (auto sit = leaves.by_env_var.find(key); sit != leaves.by_env_var.end()) {
+                    leaf = &sit->second;
+                } else if (auto sit2 = leaves.by_yaml_path.find(key); sit2 != leaves.by_yaml_path.end()) {
+                    leaf = &sit2->second;
+                }
+
+                std::string yaml_path;
+                std::string om_key_for_coercion = key;
+                if (leaf) {
+                    if (leaf->readonly_via_ui ||
+                        leaf->source == "env" || leaf->source == "ros") {
+                        // Not writable through this RPC — env requires
+                        // restart of the compose stack, ros uses params.set.
+                        skipped_keys.push_back(key);
+                        continue;
+                    }
+                    yaml_path = leaf->yaml_path;
+                    if (!leaf->env_var.empty()) {
+                        om_key_for_coercion = leaf->env_var;
+                    }
+                } else if (mapping.contains(key) && mapping.at(key).is_string()) {
+                    yaml_path = mapping.at(key).get<std::string>();
+                } else {
+                    skipped_keys.push_back(key);
                     continue;
                 }
-                const auto& mapped = mapping.at(om_key);
-                if (!mapped.is_string()) {
-                    // null mapping = read-only or no YAML target.
-                    skipped_keys.push_back(om_key);
+
+                if (yaml_path.empty()) {
+                    skipped_keys.push_back(key);
                     continue;
                 }
-                const std::string yaml_path = mapped.get<std::string>();
-                json coerced = coerce_value_for_schema(om_key, it.value());
+
+                json coerced = coerce_value_for_schema(om_key_for_coercion, it.value());
                 xbot_monitoring::yaml_io::write_path(user_yaml, yaml_path, coerced);
                 apply_to_ros_param(yaml_path, coerced);
-                updated_keys.push_back(om_key);
+                updated_keys.push_back(key);
             }
 
             xbot_monitoring::yaml_io::write_yaml_file_atomic(user_path, user_yaml);
@@ -615,6 +717,65 @@ xbot_rpc::RpcProvider rpc_provider("xbot_monitoring", {{
             }
         }
         return nullptr;
+    }),
+    RPC_METHOD("params.get_many", {
+        // Read multiple ROS parameters at once. To avoid leaking arbitrary
+        // rosparam values, the request is filtered against the schema's
+        // x-ros-param whitelist — names not declared in the schema are
+        // dropped. The frontend uses this to populate the live values for
+        // the Motion Control / Localization / Navigation advanced sections.
+        if (!params.is_object() || !params.contains("names") || !params["names"].is_array()) {
+            throw xbot_rpc::RpcException(xbot_rpc::RpcError::ERROR_INVALID_PARAMS,
+                                          "Missing names array");
+        }
+        const auto& leaves = load_leaf_index_cached();
+        json values = json::object();
+        for (const auto& entry : params["names"]) {
+            if (!entry.is_string()) continue;
+            const std::string name = entry.get<std::string>();
+            if (leaves.by_ros_param.find(name) == leaves.by_ros_param.end()) {
+                continue;
+            }
+
+            // We don't know the runtime type, so probe in the order the
+            // schema would have indicated. ros::param has typed getters,
+            // try them in turn; first one to succeed wins. XmlRpcValue
+            // would be more elegant but the typed API keeps numeric
+            // precision intact for the JSON round-trip.
+            bool got = false;
+            {
+                bool b;
+                if (ros::param::get(name, b)) {
+                    values[name] = b;
+                    got = true;
+                }
+            }
+            if (!got) {
+                int i;
+                if (ros::param::get(name, i)) {
+                    values[name] = i;
+                    got = true;
+                }
+            }
+            if (!got) {
+                double d;
+                if (ros::param::get(name, d)) {
+                    values[name] = d;
+                    got = true;
+                }
+            }
+            if (!got) {
+                std::string s;
+                if (ros::param::get(name, s)) {
+                    values[name] = s;
+                    got = true;
+                }
+            }
+            if (!got) {
+                values[name] = nullptr;
+            }
+        }
+        return json::object({{"values", values}});
     }),
     RPC_METHOD("logs.tail", {
         // Params: { source?: string, lines?: number }. Source is whitelisted
