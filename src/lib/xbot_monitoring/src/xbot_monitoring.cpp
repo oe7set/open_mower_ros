@@ -2,13 +2,21 @@
 // Created by Clemens Elflein on 22.11.22.
 // Copyright (c) 2022 Clemens Elflein. All rights reserved.
 //
+#include <cerrno>
 #include <chrono>
 #include <csignal>
+#include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <deque>
+#include <fcntl.h>
 #include <filesystem>
+#include <fstream>
 #include <functional>
+#include <sstream>
+#include <sys/wait.h>
 #include <thread>
+#include <unistd.h>
 #include <unordered_set>
 
 #include "config_io.h"
@@ -473,6 +481,193 @@ static const std::unordered_set<std::string> kRestartServices = {
     "openmower", "mower_logic", "xbot_monitoring", "move_base_flex"
 };
 
+// Probes whether the OpenMowerOS compose file mounted us into the host PID
+// namespace (`pid: host`). When set, we can `nsenter -t 1 -a <cmd>` to run
+// host-scoped commands like reboot / docker / df. Without it, system.* calls
+// that need host data degrade gracefully.
+static bool host_namespace_available() {
+    static bool checked = false;
+    static bool available = false;
+    if (!checked) {
+        checked = true;
+        // Without `pid: host`, PID 1 inside the container is our own init and
+        // shares our mount namespace. With `pid: host` PID 1 is the host's
+        // init (systemd) running in the host mount namespace, which is
+        // distinct from ours. Comparing the two ns symlinks is the canonical
+        // detection.
+        char self_link[256] = {0};
+        char host_link[256] = {0};
+        ssize_t a = readlink("/proc/self/ns/mnt", self_link, sizeof(self_link) - 1);
+        ssize_t b = readlink("/proc/1/ns/mnt", host_link, sizeof(host_link) - 1);
+        available = (a > 0 && b > 0 && std::strcmp(self_link, host_link) != 0);
+    }
+    return available;
+}
+
+// Run a shell command, capture combined stdout+stderr, with a hard timeout.
+// Returns {exit_code, output}. On timeout the child is killed and exit_code
+// is set to -1. We do not use std::system because it cannot enforce a
+// timeout, and a runaway `docker image prune` would block xbot_monitoring.
+struct ShellResult {
+    int exit_code;
+    std::string output;
+};
+static ShellResult run_with_timeout(const std::string& command, std::chrono::seconds timeout) {
+    ShellResult r{-1, ""};
+    FILE* pipe = popen((command + " 2>&1").c_str(), "r");
+    if (!pipe) {
+        r.output = "popen failed";
+        return r;
+    }
+    auto deadline = std::chrono::steady_clock::now() + timeout;
+    char buf[4096];
+    int fd = fileno(pipe);
+    int flags = fcntl(fd, F_GETFL, 0);
+    fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+    while (true) {
+        if (std::chrono::steady_clock::now() > deadline) {
+            pclose(pipe);
+            r.output += "\n[timeout]";
+            return r;
+        }
+        ssize_t n = read(fd, buf, sizeof(buf));
+        if (n > 0) {
+            r.output.append(buf, static_cast<size_t>(n));
+        } else if (n == 0) {
+            break;  // EOF
+        } else if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        } else {
+            break;
+        }
+    }
+    int status = pclose(pipe);
+    r.exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+    return r;
+}
+
+// Read /proc/stat aggregate CPU line into the active+total tick counts.
+// Returns false if the file cannot be parsed. Two snapshots taken ~100ms
+// apart let us compute a percentage without depending on /proc/uptime.
+static bool read_cpu_ticks(unsigned long long& active_out, unsigned long long& total_out) {
+    std::ifstream f("/proc/stat");
+    if (!f) return false;
+    std::string line;
+    if (!std::getline(f, line)) return false;
+    // line: "cpu  user nice system idle iowait irq softirq steal guest guest_nice"
+    std::istringstream is(line);
+    std::string tag;
+    is >> tag;
+    if (tag != "cpu") return false;
+    unsigned long long fields[10] = {0};
+    int i = 0;
+    while (i < 10 && (is >> fields[i])) ++i;
+    unsigned long long total = 0;
+    for (int k = 0; k < i; ++k) total += fields[k];
+    // active = total - (idle + iowait)
+    unsigned long long idle_ticks = (i > 3 ? fields[3] : 0) + (i > 4 ? fields[4] : 0);
+    active_out = total - idle_ticks;
+    total_out = total;
+    return true;
+}
+
+static double measure_cpu_percent() {
+    unsigned long long a1, t1, a2, t2;
+    if (!read_cpu_ticks(a1, t1)) return -1.0;
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    if (!read_cpu_ticks(a2, t2)) return -1.0;
+    if (t2 == t1) return 0.0;
+    double pct = 100.0 * static_cast<double>(a2 - a1) / static_cast<double>(t2 - t1);
+    if (pct < 0) pct = 0;
+    if (pct > 100) pct = 100;
+    return pct;
+}
+
+static bool read_meminfo(uint64_t& total_bytes, uint64_t& available_bytes) {
+    std::ifstream f("/proc/meminfo");
+    if (!f) return false;
+    std::string line;
+    bool got_total = false, got_avail = false;
+    while (std::getline(f, line)) {
+        // "MemTotal:        4012544 kB"
+        if (line.rfind("MemTotal:", 0) == 0) {
+            unsigned long long kb = 0;
+            if (std::sscanf(line.c_str(), "MemTotal: %llu kB", &kb) == 1) {
+                total_bytes = static_cast<uint64_t>(kb) * 1024ULL;
+                got_total = true;
+            }
+        } else if (line.rfind("MemAvailable:", 0) == 0) {
+            unsigned long long kb = 0;
+            if (std::sscanf(line.c_str(), "MemAvailable: %llu kB", &kb) == 1) {
+                available_bytes = static_cast<uint64_t>(kb) * 1024ULL;
+                got_avail = true;
+            }
+        }
+        if (got_total && got_avail) break;
+    }
+    return got_total && got_avail;
+}
+
+// Pi CPU temperature. Try the kernel sysfs interface first (works for any
+// Linux); fall back to vcgencmd via nsenter when the thermal_zone isn't
+// exposed (some carrier boards on non-Pi hardware).
+static bool read_cpu_temp_celsius(double& temp_out) {
+    std::ifstream f("/sys/class/thermal/thermal_zone0/temp");
+    if (f) {
+        long millicelsius = 0;
+        f >> millicelsius;
+        if (f) {
+            temp_out = millicelsius / 1000.0;
+            return true;
+        }
+    }
+    if (host_namespace_available()) {
+        ShellResult r = run_with_timeout("nsenter -t 1 -a vcgencmd measure_temp",
+                                         std::chrono::seconds(2));
+        if (r.exit_code == 0) {
+            // Output format: "temp=54.2'C\n"
+            double t = 0;
+            if (std::sscanf(r.output.c_str(), "temp=%lf", &t) == 1) {
+                temp_out = t;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+// Disk usage of the host root filesystem. statvfs("/") inside the container
+// returns the overlay's view, not the SD/eMMC. nsenter -t 1 -a df gives us
+// the host-side numbers we actually want to surface.
+static bool read_host_disk_usage(uint64_t& total, uint64_t& used, uint64_t& free) {
+    if (!host_namespace_available()) return false;
+    ShellResult r = run_with_timeout(
+        "nsenter -t 1 -a df -B1 --output=size,used,avail /",
+        std::chrono::seconds(3));
+    if (r.exit_code != 0) return false;
+    // Output:
+    //   1B-blocks       Used      Avail
+    //   31000000000  9100000000  20000000000
+    std::istringstream is(r.output);
+    std::string line;
+    std::getline(is, line);  // header
+    if (!std::getline(is, line)) return false;
+    std::istringstream ds(line);
+    unsigned long long t = 0, u = 0, a = 0;
+    if (!(ds >> t >> u >> a)) return false;
+    total = t;
+    used = u;
+    free = a;
+    return true;
+}
+
+static bool read_uptime_seconds(double& uptime_out) {
+    std::ifstream f("/proc/uptime");
+    if (!f) return false;
+    f >> uptime_out;
+    return static_cast<bool>(f);
+}
+
 xbot_rpc::RpcProvider rpc_provider("xbot_monitoring", {{
     RPC_METHOD("rpc.ping", {
         return "pong";
@@ -848,6 +1043,112 @@ xbot_rpc::RpcProvider rpc_provider("xbot_monitoring", {{
             std::raise(SIGTERM);
         }).detach();
         return json::object({{"ok", true}});
+    }),
+    RPC_METHOD("system.reboot", {
+        // Params: { delay_s?: number, default 1, clamped to [0, 30] }.
+        // Requires `pid: host` in the OpenMowerOS compose so nsenter can hop
+        // into the host PID namespace and call /sbin/reboot. Without it the
+        // call is rejected up-front rather than silently no-oping.
+        if (!host_namespace_available()) {
+            throw xbot_rpc::RpcException(xbot_rpc::RpcError::ERROR_INTERNAL,
+                                          "Host namespace not available — compose stack needs `pid: host`");
+        }
+        int delay_s = 1;
+        if (params.is_object() && params.contains("delay_s") && params["delay_s"].is_number()) {
+            delay_s = params["delay_s"].get<int>();
+        }
+        if (delay_s < 0) delay_s = 0;
+        if (delay_s > 30) delay_s = 30;
+        ROS_WARN_STREAM("system.reboot requested — host will reboot in " << delay_s << "s");
+        std::thread([delay_s]() {
+            std::this_thread::sleep_for(std::chrono::seconds(delay_s));
+            // /sbin/reboot via nsenter into the host's mount + pid namespace.
+            // Output discarded; we already responded to the RPC.
+            int rc = std::system("nsenter -t 1 -a /sbin/reboot >/dev/null 2>&1");
+            if (rc != 0) {
+                ROS_ERROR_STREAM("system.reboot: nsenter reboot exited with " << rc);
+            }
+        }).detach();
+        return json::object({{"ok", true}, {"delay_s", delay_s}});
+    }),
+    RPC_METHOD("system.stats", {
+        // Read host CPU%, RAM, CPU temp, disk usage and uptime. Each field
+        // is best-effort: if we can't read it (e.g. running in dev without
+        // pid: host) the field is simply omitted from the response so the
+        // frontend can render "n/a" without the whole call failing.
+        json result = json::object();
+        double cpu = measure_cpu_percent();
+        if (cpu >= 0) result["cpu_percent"] = cpu;
+        uint64_t ram_total = 0, ram_avail = 0;
+        if (read_meminfo(ram_total, ram_avail)) {
+            result["ram_total_bytes"] = ram_total;
+            result["ram_used_bytes"] = ram_total > ram_avail ? (ram_total - ram_avail) : 0;
+            result["ram_available_bytes"] = ram_avail;
+        }
+        double temp = 0;
+        if (read_cpu_temp_celsius(temp)) {
+            result["cpu_temp_c"] = temp;
+        }
+        uint64_t disk_total = 0, disk_used = 0, disk_free = 0;
+        if (read_host_disk_usage(disk_total, disk_used, disk_free)) {
+            result["disk_total_bytes"] = disk_total;
+            result["disk_used_bytes"] = disk_used;
+            result["disk_free_bytes"] = disk_free;
+        }
+        double up = 0;
+        if (read_uptime_seconds(up)) {
+            result["uptime_seconds"] = up;
+        }
+        return result;
+    }),
+    RPC_METHOD("system.docker_prune", {
+        // Removes all unused (dangling and not-referenced-by-any-container)
+        // images on the host. The hardcoded command does not accept any
+        // user-supplied arguments — there is no path to inject other docker
+        // subcommands here.
+        if (!host_namespace_available()) {
+            throw xbot_rpc::RpcException(xbot_rpc::RpcError::ERROR_INTERNAL,
+                                          "Host namespace not available — compose stack needs `pid: host`");
+        }
+        ROS_WARN_STREAM("system.docker_prune requested — running `docker image prune -af` on host");
+        ShellResult shell = run_with_timeout("nsenter -t 1 -a docker image prune -af",
+                                              std::chrono::seconds(60));
+        if (shell.exit_code == -1) {
+            throw xbot_rpc::RpcException(xbot_rpc::RpcError::ERROR_INTERNAL,
+                                          "docker image prune timed out or failed to spawn");
+        }
+        if (shell.exit_code != 0) {
+            throw xbot_rpc::RpcException(xbot_rpc::RpcError::ERROR_INTERNAL,
+                                          std::string("docker image prune failed: ") + shell.output);
+        }
+        // Parse "Total reclaimed space: 1.234GB" out of the output. Sizes are
+        // emitted in human-readable form, so do a small unit table.
+        uint64_t reclaimed_bytes = 0;
+        const std::string marker = "Total reclaimed space:";
+        size_t pos = shell.output.rfind(marker);
+        if (pos != std::string::npos) {
+            std::string tail = shell.output.substr(pos + marker.size());
+            double n = 0;
+            char unit_buf[8] = {0};
+            if (std::sscanf(tail.c_str(), " %lf%7s", &n, unit_buf) >= 1) {
+                std::string unit(unit_buf);
+                double mult = 1.0;
+                if (unit == "B" || unit.empty()) mult = 1.0;
+                else if (unit == "kB" || unit == "KB") mult = 1000.0;
+                else if (unit == "MB") mult = 1000.0 * 1000.0;
+                else if (unit == "GB") mult = 1000.0 * 1000.0 * 1000.0;
+                else if (unit == "TB") mult = 1000.0 * 1000.0 * 1000.0 * 1000.0;
+                else if (unit == "KiB") mult = 1024.0;
+                else if (unit == "MiB") mult = 1024.0 * 1024.0;
+                else if (unit == "GiB") mult = 1024.0 * 1024.0 * 1024.0;
+                reclaimed_bytes = static_cast<uint64_t>(n * mult);
+            }
+        }
+        return json::object({
+            {"ok", true},
+            {"reclaimed_bytes", reclaimed_bytes},
+            {"output", shell.output},
+        });
     }),
 }});
 
