@@ -8,8 +8,11 @@
 
 #include <nlohmann/json.hpp>
 
-#define RPC_METHOD(id, body) \
-  { id, [](const std::string& method, const nlohmann::basic_json<>& params) body }
+// Variadic so the body may contain top-level commas (e.g. brace-enclosed
+// initialiser lists like `json::object({{"k", v}, ...})`). The preprocessor
+// would otherwise split on those commas and reject the call as too many args.
+#define RPC_METHOD(id, ...) \
+  { id, [](const std::string& method, const nlohmann::basic_json<>& params) __VA_ARGS__ }
 
 namespace xbot_rpc {
 
