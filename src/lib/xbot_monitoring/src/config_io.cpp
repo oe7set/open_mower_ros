@@ -299,6 +299,17 @@ void walk_schema(const json& node, const std::function<void(const json&)>& visit
 
 }  // namespace
 
+namespace {
+
+std::optional<double> number_field(const json& node, const char* key) {
+  if (!node.is_object()) return std::nullopt;
+  auto it = node.find(key);
+  if (it == node.end() || !it->is_number()) return std::nullopt;
+  return it->get<double>();
+}
+
+}  // namespace
+
 SchemaLeafIndex collect_schema_leaves(const json& schema) {
   SchemaLeafIndex idx;
   walk_schema(schema, [&](const json& node) {
@@ -309,6 +320,8 @@ SchemaLeafIndex collect_schema_leaves(const json& schema) {
     leaf.ros_param = string_field(node, "x-ros-param");
     leaf.readonly_via_ui = bool_field(node, "x-readonly-via-ui");
     leaf.type = type_of(node);
+    leaf.minimum = number_field(node, "minimum");
+    leaf.maximum = number_field(node, "maximum");
     idx.all.push_back(leaf);
     if (!leaf.env_var.empty()) {
       idx.by_env_var[leaf.env_var] = leaf;

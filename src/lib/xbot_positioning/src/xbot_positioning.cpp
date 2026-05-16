@@ -363,6 +363,28 @@ int main(int argc, char **argv) {
     ros::Subscriber pose_sub = paramNh.subscribe("xb_pose_in", 10, onPose);
     ros::Subscriber wheel_tick_sub = paramNh.subscribe("wheel_ticks_in", 10, onWheelTicks);
 
+    // The map → base_link TF is published exclusively from onImu(); without
+    // an IMU stream this node sits silent forever and downstream consumers
+    // (move_base_flex's costmaps, mower_logic) crash-loop with confusing
+    // "target_frame map does not exist" errors. Emit a heartbeat every 10 s
+    // listing which inputs we have so an operator can see at a glance which
+    // upstream is missing.
+    ros::Timer diag_timer = n.createTimer(
+        ros::Duration(10.0),
+        [](const ros::TimerEvent&) {
+            double imu_age = has_gyro || last_imu.header.stamp.isZero()
+                                 ? -1.0
+                                 : (ros::Time::now() - last_imu.header.stamp).toSec();
+            double gps_age = last_gps_time.isZero()
+                                 ? -1.0
+                                 : (ros::Time::now() - last_gps_time).toSec();
+            ROS_INFO_STREAM("xbot_positioning state: has_gyro=" << has_gyro
+                            << " has_ticks=" << has_ticks
+                            << " has_gps=" << has_gps
+                            << " imu_calibration_age_s=" << imu_age
+                            << " gps_age_s=" << gps_age);
+        });
+
     ros::spin();
     return 0;
 }

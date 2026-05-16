@@ -12,7 +12,16 @@
     <rosparam file="$(find open_mower)/params/global_planner_params.yaml" command="load" />
   </node>
 
-  <node name="move_base_legacy_relay" pkg="mbf_costmap_nav" type="move_base_legacy_relay.py" respawn="true" respawn_delay="10">
+  <!--
+    Legacy bridge that proxies move_base ActionServer calls onto move_base_flex.
+    On startup it waits up to 10 s for /move_base_flex/set_parameters; while the
+    localization stack is still warming up that service hasn't been advertised
+    yet, so the relay times out and respawns. With a 10 s respawn_delay we
+    were getting six restart cycles per minute of log spam before the first
+    TF actually arrived. 30 s lets the costmaps settle without losing the
+    relay altogether — once it's up the bridge stays up.
+  -->
+  <node name="move_base_legacy_relay" pkg="mbf_costmap_nav" type="move_base_legacy_relay.py" respawn="true" respawn_delay="30">
     <param name="base_local_planner" value="FTCPlanner" />
     <param name="base_global_planner" value="GlobalPlanner" />
   </node>

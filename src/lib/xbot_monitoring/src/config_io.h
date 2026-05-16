@@ -7,6 +7,7 @@
 #pragma once
 
 #include <nlohmann/json.hpp>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -59,6 +60,11 @@ struct SchemaLeaf {
   bool readonly_via_ui = false;
   // JSON Schema "type" of the leaf, used for value coercion.
   std::string type;
+  // Optional inclusive range bounds from the JSON Schema. meta.config.set
+  // refuses values outside this range so a buggy or malicious caller cannot
+  // silently corrupt drive geometry / antenna offsets / battery thresholds.
+  std::optional<double> minimum;
+  std::optional<double> maximum;
 };
 
 // Walk the schema and collect every leaf that has either x-environment-variable

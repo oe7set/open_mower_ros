@@ -800,8 +800,23 @@ xbot_rpc::RpcProvider rpc_provider("xbot_monitoring", {{
             const std::string user_path = get_user_yaml_path();
             json user_yaml = xbot_monitoring::yaml_io::read_yaml_file(user_path);
 
-            json updated_keys = json::array();
+            // Collect the per-key write decisions in two passes: first compile
+            // the planned writes (key, yaml_path, coerced value) and the skip
+            // reasons, then apply them in one block. The two-pass split keeps
+            // the user-YAML in a fully consistent state if a single bad change
+            // would otherwise abort midway through the loop.
+            struct PlannedWrite {
+                std::string key;
+                std::string yaml_path;
+                json value;
+            };
+            std::vector<PlannedWrite> planned;
             json skipped_keys = json::array();
+
+            auto skip = [&](const std::string& key, const char* reason) {
+                skipped_keys.push_back(json::object({{"key", key}, {"reason", reason}}));
+            };
+
             for (auto it = changes.begin(); it != changes.end(); ++it) {
                 const std::string& key = it.key();
 
@@ -819,11 +834,16 @@ xbot_rpc::RpcProvider rpc_provider("xbot_monitoring", {{
                 std::string yaml_path;
                 std::string om_key_for_coercion = key;
                 if (leaf) {
-                    if (leaf->readonly_via_ui ||
-                        leaf->source == "env" || leaf->source == "ros") {
-                        // Not writable through this RPC — env requires
-                        // restart of the compose stack, ros uses params.set.
-                        skipped_keys.push_back(key);
+                    if (leaf->readonly_via_ui) {
+                        skip(key, "readonly");
+                        continue;
+                    }
+                    if (leaf->source == "env") {
+                        skip(key, "env-source");
+                        continue;
+                    }
+                    if (leaf->source == "ros") {
+                        skip(key, "ros-source");
                         continue;
                     }
                     yaml_path = leaf->yaml_path;
@@ -833,25 +853,92 @@ xbot_rpc::RpcProvider rpc_provider("xbot_monitoring", {{
                 } else if (mapping.contains(key) && mapping.at(key).is_string()) {
                     yaml_path = mapping.at(key).get<std::string>();
                 } else {
-                    skipped_keys.push_back(key);
+                    skip(key, "unknown");
                     continue;
                 }
 
                 if (yaml_path.empty()) {
-                    skipped_keys.push_back(key);
+                    skip(key, "no-yaml-path");
                     continue;
                 }
 
                 json coerced = coerce_value_for_schema(om_key_for_coercion, it.value());
-                xbot_monitoring::yaml_io::write_path(user_yaml, yaml_path, coerced);
-                apply_to_ros_param(yaml_path, coerced);
-                updated_keys.push_back(key);
+
+                // Range check: if the schema declares minimum/maximum for the
+                // leaf and the (coerced) value is numeric and outside the
+                // bound, refuse the write so a buggy or hostile caller cannot
+                // poke wheel_distance_m=0 or antenna_offset_x=99 into the
+                // running stack. Non-numeric values fall through.
+                if (leaf && coerced.is_number()) {
+                    double n = coerced.get<double>();
+                    if (leaf->minimum && n < *leaf->minimum) {
+                        skip(key, "out-of-range");
+                        continue;
+                    }
+                    if (leaf->maximum && n > *leaf->maximum) {
+                        skip(key, "out-of-range");
+                        continue;
+                    }
+                }
+
+                planned.push_back({key, yaml_path, coerced});
+            }
+
+            // Apply all planned writes to the in-memory YAML tree.
+            for (const auto& p : planned) {
+                xbot_monitoring::yaml_io::write_path(user_yaml, p.yaml_path, p.value);
+            }
+
+            // Crash-safe persist: copy the previous user YAML to <path>.bak,
+            // then atomically write, then verify the new file parses back to
+            // a YAML object. If the verify step fails we restore from the
+            // backup so the next container start has a usable params file.
+            const std::string backup_path = user_path + ".bak";
+            std::error_code ec;
+            std::filesystem::copy_file(
+                user_path, backup_path,
+                std::filesystem::copy_options::overwrite_existing, ec);
+            if (ec) {
+                ROS_WARN_STREAM("meta.config.set: could not back up " << user_path
+                                << " to " << backup_path << ": " << ec.message());
             }
 
             xbot_monitoring::yaml_io::write_yaml_file_atomic(user_path, user_yaml);
+
+            try {
+                json verify = xbot_monitoring::yaml_io::read_yaml_file(user_path);
+                if (!verify.is_object()) {
+                    throw std::runtime_error("post-write YAML did not parse to an object");
+                }
+            } catch (const std::exception& verify_err) {
+                ROS_ERROR_STREAM("meta.config.set: post-write verification failed: "
+                                 << verify_err.what() << "; rolling back from " << backup_path);
+                std::filesystem::copy_file(
+                    backup_path, user_path,
+                    std::filesystem::copy_options::overwrite_existing, ec);
+                if (ec) {
+                    throw std::runtime_error(
+                        std::string("rollback failed: ") + ec.message() +
+                        " (verification error: " + verify_err.what() + ")");
+                }
+                throw std::runtime_error(
+                    std::string("post-write verification failed; rolled back: ") +
+                    verify_err.what());
+            }
+
+            // YAML on disk is good. Now push each value into ros::param so
+            // live nodes see it without a restart. We delay this until after
+            // the file write so a write failure cannot leave the param
+            // server divergent from disk.
+            json updated_keys = json::array();
+            for (const auto& p : planned) {
+                apply_to_ros_param(p.yaml_path, p.value);
+                updated_keys.push_back(p.key);
+            }
+
             ROS_INFO_STREAM("meta.config.set wrote " << updated_keys.size()
                              << " change(s) to " << user_path
-                             << " (skipped " << skipped_keys.size() << " unmapped)");
+                             << " (skipped " << skipped_keys.size() << ")");
             return json::object({{"updated", updated_keys.size()},
                                  {"updated_keys", updated_keys},
                                  {"skipped_keys", skipped_keys}});
