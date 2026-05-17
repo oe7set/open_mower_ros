@@ -2,9 +2,11 @@
 // Created by Clemens Elflein on 22.11.22.
 // Copyright (c) 2022 Clemens Elflein. All rights reserved.
 //
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <csignal>
+#include <mutex>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -20,7 +22,9 @@
 #include <unordered_set>
 
 #include "config_io.h"
+#include "events_io.h"
 #include "yaml_io.h"
+#include "xbot_msgs/Event.h"
 #include "ros/ros.h"
 #include "rosgraph_msgs/Log.h"
 #include <ros/package.h>
@@ -451,6 +455,59 @@ static std::string rosout_level_to_string(int8_t level) {
 // retained on MQTT for the openmower-app /statistics page.
 void mowing_sessions_callback(const std_msgs::String::ConstPtr &msg) {
     try_publish("mowing_sessions/json", msg->data, true);
+}
+
+// Notification / event store. Single owner, single writer thread (the ROS
+// callback). Persisted to ~/.openmower/events.json with a debounced write so
+// bursty event streams do not hammer the disk.
+xbot_monitoring::events_io::EventStore event_store;
+std::string event_store_path;
+std::mutex event_persist_mutex;
+std::chrono::steady_clock::time_point event_persist_pending_until{};
+std::thread event_persist_thread;
+std::atomic<bool> event_persist_thread_running{false};
+
+void schedule_event_persist() {
+    using namespace std::chrono;
+    if (event_store_path.empty()) return;
+    {
+        std::lock_guard<std::mutex> lk(event_persist_mutex);
+        event_persist_pending_until = steady_clock::now() + milliseconds(500);
+        if (event_persist_thread_running.exchange(true)) {
+            return;  // a worker is already coalescing.
+        }
+    }
+    std::thread([] {
+        while (true) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            std::chrono::steady_clock::time_point deadline;
+            {
+                std::lock_guard<std::mutex> lk(event_persist_mutex);
+                deadline = event_persist_pending_until;
+            }
+            if (std::chrono::steady_clock::now() < deadline) continue;
+            try {
+                event_store.persist(event_store_path);
+            } catch (const std::exception& e) {
+                ROS_WARN_STREAM("events: failed to persist " << event_store_path << ": " << e.what());
+            }
+            std::lock_guard<std::mutex> lk(event_persist_mutex);
+            // Another emit may have re-armed the deadline while we were
+            // writing; loop again rather than racing.
+            if (std::chrono::steady_clock::now() < event_persist_pending_until) continue;
+            event_persist_thread_running = false;
+            return;
+        }
+    }).detach();
+}
+
+void event_callback(const xbot_msgs::Event::ConstPtr& msg) {
+    json view = event_store.add(*msg);
+    // Live stream: non-retained, single event per message.
+    try_publish("events/stream", view.dump(), false);
+    // Retained snapshot: full buffer, used by app cold-start.
+    try_publish("events/json", event_store.snapshot_json().dump(), true);
+    schedule_event_persist();
 }
 
 void rosout_callback(const rosgraph_msgs::Log::ConstPtr &msg) {
@@ -1190,6 +1247,72 @@ xbot_rpc::RpcProvider rpc_provider("xbot_monitoring", {{
         }
         return result;
     }),
+    RPC_METHOD("events.list", {
+        // Params (all optional):
+        //   limit: number, default 200, clamped to [1, 500]
+        //   since_ts: number (epoch ms) — return events strictly newer than this
+        //   severity_min: "info" | "warning" | "error" | "critical"
+        //   types: string[] — if set, only return events whose type is in the list
+        // Returns: { events: [...], unread: <int> }. Newest event first.
+        xbot_monitoring::events_io::ListFilter filter;
+        size_t limit = 200;
+        if (params.is_object()) {
+            if (params.contains("limit") && params["limit"].is_number_integer()) {
+                int l = params["limit"].get<int>();
+                if (l < 1) l = 1;
+                if (l > 500) l = 500;
+                limit = static_cast<size_t>(l);
+            }
+            if (params.contains("since_ts") && params["since_ts"].is_number()) {
+                filter.since_ts = static_cast<uint64_t>(params["since_ts"].get<double>());
+            }
+            if (params.contains("severity_min") && params["severity_min"].is_string()) {
+                std::string s = params["severity_min"].get<std::string>();
+                if (s == "info") filter.severity_min = xbot_msgs::Event::SEVERITY_INFO;
+                else if (s == "warning") filter.severity_min = xbot_msgs::Event::SEVERITY_WARNING;
+                else if (s == "error") filter.severity_min = xbot_msgs::Event::SEVERITY_ERROR;
+                else if (s == "critical") filter.severity_min = xbot_msgs::Event::SEVERITY_CRITICAL;
+                else throw xbot_rpc::RpcException(xbot_rpc::RpcError::ERROR_INVALID_PARAMS,
+                                                  "severity_min must be info|warning|error|critical");
+            }
+            if (params.contains("types") && params["types"].is_array()) {
+                for (const auto& t : params["types"]) {
+                    if (t.is_string()) filter.types.push_back(t.get<std::string>());
+                }
+            }
+        }
+        filter.limit = limit;
+        return json::object({
+            {"events", event_store.list_json(filter)},
+            {"unread", event_store.unread_count()},
+        });
+    }),
+    RPC_METHOD("events.ack", {
+        // Params: { id: string }. Marks the matching event as acked. Unknown
+        // ids are not an error — the result simply reports ok=false.
+        if (!params.is_object() || !params.contains("id") || !params["id"].is_string()) {
+            throw xbot_rpc::RpcException(xbot_rpc::RpcError::ERROR_INVALID_PARAMS,
+                                          "id (string) is required");
+        }
+        bool ok = event_store.ack(params["id"].get<std::string>());
+        if (ok) {
+            try_publish("events/json", event_store.snapshot_json().dump(), true);
+            schedule_event_persist();
+        }
+        return json::object({{"ok", ok}});
+    }),
+    RPC_METHOD("events.ack_all", {
+        event_store.ack_all();
+        try_publish("events/json", event_store.snapshot_json().dump(), true);
+        schedule_event_persist();
+        return json::object({{"ok", true}});
+    }),
+    RPC_METHOD("events.clear", {
+        event_store.clear();
+        try_publish("events/json", event_store.snapshot_json().dump(), true);
+        schedule_event_persist();
+        return json::object({{"ok", true}});
+    }),
     RPC_METHOD("system.docker_prune", {
         // Removes all unused (dangling and not-referenced-by-any-container)
         // images on the host. The hardcoded command does not accept any
@@ -1906,6 +2029,24 @@ int main(int argc, char **argv) {
     // we rebroadcast it retained on MQTT for the openmower-app /statistics page.
     ros::Subscriber mowingSessionsSubscriber = n->subscribe(
         "xbot_monitoring/mowing_sessions", 1, mowing_sessions_callback);
+
+    // Notification / event bus. Producers (mower_logic, mower_scheduler,
+    // others) publish on /events; we persist + mirror to MQTT. Path is
+    // overridable via ROS param so tests/dev setups can redirect it.
+    {
+        const char *home = std::getenv("HOME");
+        std::string default_events_path = std::string(home ? home : "/root") + "/.openmower/events.json";
+        event_store_path = paramNh.param("events_path", default_events_path);
+        try {
+            event_store.load(event_store_path);
+            // Republish the loaded snapshot so subscribers connecting before
+            // the first new event still see history.
+            try_publish("events/json", event_store.snapshot_json().dump(), true);
+        } catch (const std::exception& e) {
+            ROS_WARN_STREAM("events: load failed: " << e.what());
+        }
+    }
+    ros::Subscriber eventsSubscriber = n->subscribe("/events", 50, event_callback);
 
     cmd_vel_pub = n->advertise<geometry_msgs::Twist>("xbot_monitoring/remote_cmd_vel", 1);
     action_pub = n->advertise<std_msgs::String>("xbot/action", 1);

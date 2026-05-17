@@ -21,6 +21,8 @@
 #include <rosbag/bag.h>
 #include <rosbag/view.h>
 
+#include <event_publisher/event_publisher.hpp>
+
 #include "mower_logic/CheckPoint.h"
 #include "mower_map/ClearNavPointSrv.h"
 #include "mower_map/GetMowingAreaSrv.h"
@@ -112,6 +114,8 @@ void MowingBehavior::enter() {
     a.enabled = true;
   }
   registerActions("mower_logic:mowing", actions);
+
+  open_mower::events::EventPublisher::info("mowing.started", "Mowing started", {{"area_index", currentMowingArea}});
 }
 
 void MowingBehavior::exit() {
@@ -119,6 +123,13 @@ void MowingBehavior::exit() {
     a.enabled = false;
   }
   registerActions("mower_logic:mowing", actions);
+
+  // Surface only the natural-completion case here; aborted/paused exits emit
+  // their own events from the pause/abort code paths.
+  if (!aborted && !paused) {
+    open_mower::events::EventPublisher::info("mowing.session_completed", "Mowing session finished",
+                                             {{"area_index", currentMowingArea}});
+  }
 }
 
 void MowingBehavior::reset() {

@@ -9,6 +9,7 @@ project(mower_logic)
 ## is used, also find other catkin packages
 find_package(catkin REQUIRED COMPONENTS
         dynamic_reconfigure
+        event_publisher
         ftc_local_planner
         mbf_msgs
         mower_map

@@ -45,6 +45,8 @@ from xbot_msgs.msg import RobotState
 from xbot_rpc.msg import RpcError, RpcRequest, RpcResponse
 from xbot_rpc.srv import RegisterMethodsSrv, RegisterMethodsSrvRequest
 
+import event_publisher
+
 
 def _resolve_zone(name: str):
     """Resolve an IANA zone name. Returns None if the name is unknown.
@@ -362,6 +364,7 @@ class ScheduleStore:
 class SchedulerNode:
     def __init__(self) -> None:
         rospy.init_node(NODE_ID)
+        event_publisher.init("mower_scheduler")
         path = rospy.get_param("~schedules_path", DEFAULT_PATH)
         self.store = ScheduleStore(path)
         rospy.loginfo("mower_scheduler loaded %d schedule(s) from %s", len(self.store.list_public()), path)
@@ -485,12 +488,14 @@ class SchedulerNode:
             )
             for schedule, _ in candidates:
                 self.store.record_skip(schedule["id"], global_reason, now_utc)
+                self._emit_skip(schedule, global_reason)
             return
 
         for schedule, occurrence_utc in candidates:
             if schedule.get("weather", {}).get("skip_if_rain") and getattr(state, "rain_detected", False):
                 rospy.loginfo("Skipping schedule %s — rain detected", schedule["id"])
                 self.store.record_skip(schedule["id"], SKIP_RAIN, now_utc)
+                self._emit_skip(schedule, SKIP_RAIN)
                 continue
             self._fire(schedule, occurrence_utc, now_utc)
 
@@ -532,6 +537,28 @@ class SchedulerNode:
         msg = String()
         msg.data = START_ACTION_ID
         self._action_pub.publish(msg)
+        event_publisher.info(
+            "schedule.run_started",
+            f"Schedule '{schedule['name']}' fired",
+            {"schedule_id": schedule["id"], "name": schedule["name"], "area_index": area_index},
+        )
+
+    @staticmethod
+    def _emit_skip(schedule: dict, reason: str) -> None:
+        # Most skip reasons are mundane (e.g. mower not idle yet) — surface
+        # them at INFO. Rain and emergency are explicit user-visible signals
+        # so bump them to WARNING.
+        severity = (
+            event_publisher.SEVERITY_WARNING
+            if reason in (SKIP_RAIN, SKIP_EMERGENCY)
+            else event_publisher.SEVERITY_INFO
+        )
+        event_publisher.emit(
+            severity,
+            "schedule.run_skipped",
+            f"Schedule '{schedule['name']}' skipped — {reason}",
+            {"schedule_id": schedule["id"], "name": schedule["name"], "reason": reason},
+        )
 
 
 def main() -> None:

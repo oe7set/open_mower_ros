@@ -16,6 +16,8 @@
 
 #include <mower_msgs/Power.h>
 
+#include <event_publisher/event_publisher.hpp>
+
 #include "tf2_eigen/tf2_eigen.h"
 
 extern ros::ServiceClient dockingPointClient;
@@ -170,6 +172,8 @@ void UndockingBehavior::enter() {
     a.enabled = true;
   }
   registerActions("mower_logic:undocking", actions);
+
+  open_mower::events::EventPublisher::info("undocking.started", "Leaving dock");
 }
 
 void UndockingBehavior::exit() {
@@ -177,6 +181,10 @@ void UndockingBehavior::exit() {
     a.enabled = false;
   }
   registerActions("mower_logic:undocking", actions);
+
+  if (aborted) {
+    open_mower::events::EventPublisher::error("undocking.failed", "Undocking aborted");
+  }
 }
 
 void UndockingBehavior::reset() {

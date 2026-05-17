@@ -57,7 +57,8 @@ include_directories(
 add_executable(xbot_monitoring
         src/xbot_monitoring.cpp
         src/config_io.cpp
-        src/yaml_io.cpp)
+        src/yaml_io.cpp
+        src/events_io.cpp)
 
 
 add_dependencies(xbot_monitoring ${catkin_EXPORTED_TARGETS} ${${PROJECT_NAME}_EXPORTED_TARGETS})

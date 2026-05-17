@@ -12,6 +12,7 @@ catkin_package()
 
 catkin_install_python(PROGRAMS
   nodes/scheduler.py
+  nodes/event_publisher.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 

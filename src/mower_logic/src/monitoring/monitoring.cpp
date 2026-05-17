@@ -22,6 +22,7 @@
 #include <sstream>
 #include <string>
 
+#include "event_publisher/event_publisher.hpp"
 #include "mower_logic/MowerLogicConfig.h"
 #include "mower_logic/PowerConfig.h"
 #include "mower_msgs/HighLevelStatus.h"
@@ -129,11 +130,63 @@ void high_level_status(const mower_msgs::HighLevelStatus::ConstPtr& msg) {
   state_pub.publish(state);
 }
 
+// RTK fix-type tracking. We only emit lost/restored events on a sustained
+// transition (3 seconds) to avoid spam from momentary fix drops in heavy
+// canopy. State is the canonical "good RTK" boolean (fix_type >= 4) plus the
+// timestamp of the last contradictory observation.
+namespace {
+const ros::Duration kRtkTransitionThreshold(3.0);
+bool rtk_currently_good = true;  // assume good until proven otherwise
+bool rtk_pending_state = true;   // candidate next state
+ros::Time rtk_pending_since{0, 0};
+}  // namespace
+
 void gps_status_received(const xbot_msgs::GpsStatus::ConstPtr& msg) {
   state.gps_fix_type = msg->fix_type;
   state.gps_satellite_count = msg->satellite_count;
   state.gps_pdop = msg->pdop;
+
+  // GpsStatus.fix_type: 0=no fix, 1=2D, 2=3D, 3=DGPS/SBAS, 4=RTK float, 5=RTK fixed.
+  // Treat fix_type >= 4 as "RTK quality"; anything below is the loss case.
+  constexpr uint8_t kRtkFloatThreshold = 4;
+  const bool good_now = msg->fix_type >= kRtkFloatThreshold;
+  const ros::Time now = ros::Time::now();
+  if (good_now == rtk_currently_good) {
+    rtk_pending_since = ros::Time(0, 0);
+    return;
+  }
+  if (good_now != rtk_pending_state) {
+    rtk_pending_state = good_now;
+    rtk_pending_since = now;
+    return;
+  }
+  if (rtk_pending_since.isZero() || (now - rtk_pending_since) < kRtkTransitionThreshold) {
+    return;
+  }
+  rtk_currently_good = good_now;
+  rtk_pending_since = ros::Time(0, 0);
+  if (good_now) {
+    open_mower::events::EventPublisher::info(
+        "gps.rtk_restored", "RTK fix restored",
+        {{"fix_type", static_cast<int>(msg->fix_type)}, {"satellites", static_cast<int>(msg->satellite_count)}});
+  } else {
+    open_mower::events::EventPublisher::warning(
+        "gps.rtk_lost", "RTK fix lost",
+        {{"fix_type", static_cast<int>(msg->fix_type)}, {"satellites", static_cast<int>(msg->satellite_count)}});
+  }
 }
+
+// WLAN-presence tracking. WLAN is "present" when /proc/net/wireless yields a
+// non-zero dBm reading. Same debounce idea as RTK above — 5 s sustained
+// transition before we surface lost/restored, so a single dropped read does
+// not page the user.
+namespace {
+const ros::Duration kWifiTransitionThreshold(5.0);
+bool wifi_currently_present = true;
+bool wifi_pending_state = true;
+ros::Time wifi_pending_since{0, 0};
+bool wifi_seen_once = false;  // suppress lost-event before we ever had a reading
+}  // namespace
 
 // Reads /proc/net/wireless (no privileged calls or external binaries needed).
 // On a host without WLAN (e.g. Ethernet-only setups) the file either misses
@@ -180,6 +233,36 @@ static void update_wifi_stats() {
   if (q > 1.0) q = 1.0;
   state.wifi_link_quality = static_cast<float>(q);
   state.wifi_signal_dbm = static_cast<int16_t>(level);
+
+  const bool present_now = state.wifi_signal_dbm != 0;
+  if (!wifi_seen_once) {
+    wifi_seen_once = true;
+    wifi_currently_present = present_now;
+    wifi_pending_state = present_now;
+    return;
+  }
+  const ros::Time now = ros::Time::now();
+  if (present_now == wifi_currently_present) {
+    wifi_pending_since = ros::Time(0, 0);
+    return;
+  }
+  if (present_now != wifi_pending_state) {
+    wifi_pending_state = present_now;
+    wifi_pending_since = now;
+    return;
+  }
+  if (wifi_pending_since.isZero() || (now - wifi_pending_since) < kWifiTransitionThreshold) {
+    return;
+  }
+  wifi_currently_present = present_now;
+  wifi_pending_since = ros::Time(0, 0);
+  if (present_now) {
+    open_mower::events::EventPublisher::info(
+        "wifi.restored", "WiFi link restored",
+        {{"signal_dbm", state.wifi_signal_dbm}, {"link_quality", state.wifi_link_quality}});
+  } else {
+    open_mower::events::EventPublisher::warning("wifi.lost", "WiFi link lost");
+  }
 }
 
 void pose_received(const xbot_msgs::AbsolutePose::ConstPtr& msg) {
@@ -387,6 +470,7 @@ int main(int argc, char** argv) {
 
   n = new ros::NodeHandle();
   paramNh = new ros::NodeHandle("/mower_comms");
+  open_mower::events::EventPublisher::init(*n, "monitoring");
   ros::NodeHandle logicParamNh{"/mower_logic"};
   ros::NodeHandle powerParamNh{"/ll/services/power"};
 

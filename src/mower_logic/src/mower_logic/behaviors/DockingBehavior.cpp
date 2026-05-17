@@ -16,6 +16,8 @@
 
 #include <mower_msgs/Power.h>
 
+#include <event_publisher/event_publisher.hpp>
+
 #include "../utils.h"
 #include "PerimeterDocking.h"
 
@@ -288,6 +290,8 @@ void DockingBehavior::enter() {
     a.enabled = true;
   }
   registerActions("mower_logic:docking", actions);
+
+  open_mower::events::EventPublisher::info("docking.started", "Returning to dock");
 }
 
 void DockingBehavior::exit() {
@@ -295,6 +299,12 @@ void DockingBehavior::exit() {
     a.enabled = false;
   }
   registerActions("mower_logic:docking", actions);
+
+  if (aborted) {
+    open_mower::events::EventPublisher::error("docking.failed", "Docking aborted");
+  } else {
+    open_mower::events::EventPublisher::info("docking.completed", "Docked successfully");
+  }
 }
 
 void DockingBehavior::reset() {

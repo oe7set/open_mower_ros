@@ -32,6 +32,7 @@
 #include "behaviors/AreaRecordingBehavior.h"
 #include "behaviors/Behavior.h"
 #include "behaviors/IdleBehavior.h"
+#include "event_publisher/event_publisher.hpp"
 #include "ftc_local_planner/PlannerGetProgress.h"
 #include "mbf_msgs/ExePathAction.h"
 #include "mbf_msgs/MoveBaseAction.h"
@@ -302,6 +303,11 @@ void stopBlade() {
   // ROS_INFO_STREAM("om_mower_logic: stopBlade() - finished");
 }
 
+// Tracks the last emergency state we successfully pushed to the firmware so
+// the event surface only fires on transitions (raised / cleared) rather than
+// on every retry.
+static std::atomic<bool> last_emergency_state{false};
+
 /// @brief Stop BLADE motor and any movement
 /// @param emergency
 void setEmergencyMode(bool emergency) {
@@ -324,6 +330,18 @@ void setEmergencyMode(bool emergency) {
 
   if (!success) {
     ROS_ERROR_STREAM("Error setting emergency. THIS SHOULD NEVER HAPPEN");
+    return;
+  }
+
+  // Only surface state-change events; setEmergencyMode() is also called as a
+  // safety reassertion on every behavior transition, so suppress duplicates.
+  bool prev = last_emergency_state.exchange(emergency);
+  if (prev != emergency) {
+    if (emergency) {
+      open_mower::events::EventPublisher::critical("emergency.raised", "Emergency stop activated");
+    } else {
+      open_mower::events::EventPublisher::info("emergency.cleared", "Emergency cleared");
+    }
   }
 }
 
@@ -649,6 +667,7 @@ int main(int argc, char** argv) {
 
   n = new ros::NodeHandle();
   paramNh = new ros::NodeHandle("~");
+  open_mower::events::EventPublisher::init(*n, "mower_logic");
   ros::NodeHandle powerNodeHandle("/ll/services/power");
   mowerAllowed = false;
 

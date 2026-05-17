@@ -20,6 +20,7 @@ add_message_files(
         ActionInfo.msg
         MapOverlay.msg
         MapOverlayPolygon.msg
+        Event.msg
 )
 
 add_service_files(
