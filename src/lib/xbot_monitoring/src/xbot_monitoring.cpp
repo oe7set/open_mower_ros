@@ -3,6 +3,7 @@
 // Copyright (c) 2022 Clemens Elflein. All rights reserved.
 //
 #include <atomic>
+#include <cctype>
 #include <cerrno>
 #include <chrono>
 #include <csignal>
@@ -547,16 +548,33 @@ static bool host_namespace_available() {
     static bool available = false;
     if (!checked) {
         checked = true;
-        // Without `pid: host`, PID 1 inside the container is our own init and
-        // shares our mount namespace. With `pid: host` PID 1 is the host's
-        // init (systemd) running in the host mount namespace, which is
-        // distinct from ours. Comparing the two ns symlinks is the canonical
-        // detection.
-        char self_link[256] = {0};
-        char host_link[256] = {0};
-        ssize_t a = readlink("/proc/self/ns/mnt", self_link, sizeof(self_link) - 1);
-        ssize_t b = readlink("/proc/1/ns/mnt", host_link, sizeof(host_link) - 1);
-        available = (a > 0 && b > 0 && std::strcmp(self_link, host_link) != 0);
+        // We run as a non-root user (`openmower`, see Dockerfile), so the
+        // /proc/1/ns/* symlinks are not readable for us — readlink returns
+        // EACCES. Use /proc/1/comm instead, which is world-readable: with
+        // `pid: host` it reports the host init (e.g. "systemd"); without it,
+        // PID 1 is our container's own entrypoint ("openmower_entrypo" /
+        // "bash" / similar). Treat anything that isn't our own command as
+        // "host pid namespace shared".
+        std::ifstream f("/proc/1/comm");
+        if (f) {
+            std::string pid1_comm;
+            std::getline(f, pid1_comm);
+            // Strip trailing newline / whitespace just in case.
+            while (!pid1_comm.empty() && std::isspace(static_cast<unsigned char>(pid1_comm.back()))) {
+                pid1_comm.pop_back();
+            }
+            // Container PID 1 candidates we know we ship:
+            //   - "openmower_entrypo" (truncated openmower_entrypoint.sh, /proc/comm caps at 15 chars)
+            //   - "bash" / "sh" (when launched via shell wrappers)
+            //   - "roslaunch" (only if exec'd directly, unlikely)
+            // Anything else (typically "systemd" on the Pi) means we have
+            // joined the host PID namespace.
+            available = !(pid1_comm == "openmower_entrypo" ||
+                          pid1_comm == "openmower_entry" ||
+                          pid1_comm == "bash" ||
+                          pid1_comm == "sh" ||
+                          pid1_comm.empty());
+        }
     }
     return available;
 }
@@ -679,7 +697,9 @@ static bool read_cpu_temp_celsius(double& temp_out) {
         }
     }
     if (host_namespace_available()) {
-        ShellResult r = run_with_timeout("nsenter -t 1 -a vcgencmd measure_temp",
+        // sudo -n: container runs as non-root `openmower`; nsenter needs
+        // CAP_SYS_ADMIN. Passwordless sudo is wired up in the Dockerfile.
+        ShellResult r = run_with_timeout("sudo -n nsenter -t 1 -a vcgencmd measure_temp",
                                          std::chrono::seconds(2));
         if (r.exit_code == 0) {
             // Output format: "temp=54.2'C\n"
@@ -699,7 +719,7 @@ static bool read_cpu_temp_celsius(double& temp_out) {
 static bool read_host_disk_usage(uint64_t& total, uint64_t& used, uint64_t& free) {
     if (!host_namespace_available()) return false;
     ShellResult r = run_with_timeout(
-        "nsenter -t 1 -a df -B1 --output=size,used,avail /",
+        "sudo -n nsenter -t 1 -a df -B1 --output=size,used,avail /",
         std::chrono::seconds(3));
     if (r.exit_code != 0) return false;
     // Output:
@@ -1210,7 +1230,7 @@ xbot_rpc::RpcProvider rpc_provider("xbot_monitoring", {{
             std::this_thread::sleep_for(std::chrono::seconds(delay_s));
             // /sbin/reboot via nsenter into the host's mount + pid namespace.
             // Output discarded; we already responded to the RPC.
-            int rc = std::system("nsenter -t 1 -a /sbin/reboot >/dev/null 2>&1");
+            int rc = std::system("sudo -n nsenter -t 1 -a /sbin/reboot >/dev/null 2>&1");
             if (rc != 0) {
                 ROS_ERROR_STREAM("system.reboot: nsenter reboot exited with " << rc);
             }
@@ -1323,7 +1343,7 @@ xbot_rpc::RpcProvider rpc_provider("xbot_monitoring", {{
                                           "Host namespace not available — compose stack needs `pid: host`");
         }
         ROS_WARN_STREAM("system.docker_prune requested — running `docker image prune -af` on host");
-        ShellResult shell = run_with_timeout("nsenter -t 1 -a docker image prune -af",
+        ShellResult shell = run_with_timeout("sudo -n nsenter -t 1 -a docker image prune -af",
                                               std::chrono::seconds(60));
         if (shell.exit_code == -1) {
             throw xbot_rpc::RpcException(xbot_rpc::RpcError::ERROR_INTERNAL,
