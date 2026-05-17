@@ -8,11 +8,12 @@ find_package(catkin REQUIRED COMPONENTS
   xbot_rpc
 )
 
+catkin_python_setup()
+
 catkin_package()
 
 catkin_install_python(PROGRAMS
   nodes/scheduler.py
-  nodes/event_publisher.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 

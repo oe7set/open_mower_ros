@@ -7,7 +7,7 @@ fires mower_logic/start_mowing via the /xbot/action publisher when a job is
 due. Three RPC methods (schedule.list / schedule.upsert / schedule.delete)
 let the frontend manage the schedule store.
 
-The persisted file at ~/.openmower/schedules.json has the shape:
+The persisted file at $ROS_HOME/openmower/schedules.json has the shape:
 
   {
     "version": 1,
@@ -45,7 +45,7 @@ from xbot_msgs.msg import RobotState
 from xbot_rpc.msg import RpcError, RpcRequest, RpcResponse
 from xbot_rpc.srv import RegisterMethodsSrv, RegisterMethodsSrvRequest
 
-import event_publisher
+from mower_scheduler import event_publisher
 
 
 def _resolve_zone(name: str):
@@ -65,7 +65,9 @@ def _resolve_zone(name: str):
 ERROR_INVALID_PARAMS = -32602
 ERROR_INTERNAL = -32603
 
-DEFAULT_PATH = os.path.expanduser("~/.openmower/schedules.json")
+DEFAULT_PATH = os.path.expanduser(
+    os.environ.get("ROS_HOME", "~/.ros") + "/openmower/schedules.json"
+)
 # Mirrors MOWER_ACTIONS.startMowing in openmower-app/src/lib/mowerActions.ts
 # and the IdleBehavior::handle_action match in
 # open_mower_ros/src/mower_logic/.../IdleBehavior.cpp. The ":idle/" namespace

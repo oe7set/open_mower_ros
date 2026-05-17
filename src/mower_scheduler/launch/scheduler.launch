@@ -1,6 +1,9 @@
 <launch>
-  <!-- Path to the schedule store. Override per deployment if needed. -->
-  <arg name="schedules_path" default="$(env HOME)/.openmower/schedules.json"/>
+  <!-- Path to the schedule store. /data/ros is the OpenMowerOS bind-mount on
+       /home/openmower/ros and survives container/image updates. Mirrors
+       mower_sessions_recorder/launch/recorder.launch. Override per deployment
+       if needed. -->
+  <arg name="schedules_path" default="/data/ros/openmower/schedules.json"/>
 
   <node pkg="mower_scheduler" type="scheduler.py" name="mower_scheduler"
         output="screen" respawn="true" respawn_delay="10">
