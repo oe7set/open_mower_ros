@@ -73,6 +73,13 @@ int valid_gps_samples = 0;
 
 ros::Time last_gps_time(0.0);
 
+// Last position_accuracy received on /xbot_positioning/xb_pose, regardless
+// of fix class. Used to surface a meaningful number (Float ~1.5 m, 3D ~30 m)
+// to monitoring/UI even when we don't have an RTK Fixed solution to feed
+// into the kalman filter. 999 only as a true cold-start sentinel.
+double last_pose_accuracy = 999.0;
+ros::Time last_pose_accuracy_time(0.0);
+
 
 void onImu(const sensor_msgs::Imu::ConstPtr &msg) {
     if (!has_gyro) {
@@ -149,16 +156,21 @@ void onImu(const sensor_msgs::Imu::ConstPtr &msg) {
     xb_absolute_pose_msg.orientation_valid = true;
     // TODO: send motion vector
     xb_absolute_pose_msg.motion_vector_valid = false;
-    // TODO: set real value from kalman filter, not the one from the GPS.
-    if (has_gps) {
+    // Surface a useful position_accuracy to downstream consumers (monitoring,
+    // app UI). Three tiers: a recent RTK-Fixed solution wins (sub-cm range,
+    // matches what the kalman filter is using), otherwise fall back to the
+    // raw receiver-reported accuracy of any fix class so the value keeps
+    // tracking real GPS quality (e.g. ~1.5 m on Float, tens of metres on a
+    // 3D fix). Only emit the 999 cold-start sentinel until we've ever seen a
+    // pose. mower_logic still gates mowing/docking on the numeric threshold
+    // (max_position_accuracy ~0.2 m), so non-RTK values don't unblock autonomy.
+    const bool rtk_recent = has_gps && (ros::Time::now() - last_gps_time).toSec() < 10.0;
+    if (rtk_recent) {
         xb_absolute_pose_msg.position_accuracy = last_gps.position_accuracy;
-    } else {
-        xb_absolute_pose_msg.position_accuracy = 999;
-    }
-    if ((ros::Time::now() - last_gps_time).toSec() < 10.0) {
         xb_absolute_pose_msg.flags |= xbot_msgs::AbsolutePose::FLAG_SENSOR_FUSION_RECENT_ABSOLUTE_POSE;
+    } else if (!last_pose_accuracy_time.isZero()) {
+        xb_absolute_pose_msg.position_accuracy = static_cast<float>(last_pose_accuracy);
     } else {
-        // on GPS timeout, we set accuracy to 0.
         xb_absolute_pose_msg.position_accuracy = 999;
     }
     // TODO: set real value
@@ -226,6 +238,12 @@ void onPose(const xbot_msgs::AbsolutePose::ConstPtr &msg) {
   if (!gps_enabled) {
     return;
   }
+    // Always remember the most recent receiver-reported accuracy, regardless
+    // of fix class. The kalman filter only consumes RTK-Fixed updates (gate
+    // below), but downstream consumers want to see Float/3D/Single accuracy
+    // change in real time when RTK is lost.
+    last_pose_accuracy = msg->position_accuracy;
+    last_pose_accuracy_time = ros::Time::now();
     // TODO fuse with high covariance?
     if ((msg->flags & (xbot_msgs::AbsolutePose::FLAG_GPS_RTK_FIXED)) == 0) {
         ROS_INFO_STREAM_THROTTLE(1, "Dropped GPS update, since it's not RTK Fixed");
