@@ -24,6 +24,7 @@
 
 #include "config_io.h"
 #include "events_io.h"
+#include "sensors_history.h"
 #include "yaml_io.h"
 #include "xbot_msgs/Event.h"
 #include "ros/ros.h"
@@ -463,6 +464,12 @@ void mowing_sessions_callback(const std_msgs::String::ConstPtr &msg) {
 // bursty event streams do not hammer the disk.
 xbot_monitoring::events_io::EventStore event_store;
 std::string event_store_path;
+
+// In-memory ring buffer of recent SensorDataDouble samples (~1 h @ 2 Hz per
+// sensor). Populated on every numeric sensor message we forward to MQTT and
+// consumed by the sensors.history* RPCs so the frontend can show charts
+// immediately on connect instead of waiting for live samples.
+xbot_monitoring::sensors_history::SensorHistory sensor_history;
 std::mutex event_persist_mutex;
 std::chrono::steady_clock::time_point event_persist_pending_until{};
 std::thread event_persist_thread;
@@ -1333,6 +1340,54 @@ xbot_rpc::RpcProvider rpc_provider("xbot_monitoring", {{
         schedule_event_persist();
         return json::object({{"ok", true}});
     }),
+    RPC_METHOD("sensors.history", {
+        // Params:
+        //   sensor_id: string  (required) — id matching SensorInfo.sensor_id
+        //   since_ts:  number  (optional, epoch ms) — return strictly newer
+        //   limit:     number  (optional, default 7200, clamped to [1, 7200])
+        // Returns: { sensor_id, samples: [{ts_ms, value}, ...] } oldest→newest
+        if (!params.is_object() || !params.contains("sensor_id") ||
+            !params["sensor_id"].is_string()) {
+            throw xbot_rpc::RpcException(xbot_rpc::RpcError::ERROR_INVALID_PARAMS,
+                                          "sensor_id (string) is required");
+        }
+        std::optional<uint64_t> since_ts;
+        if (params.contains("since_ts") && params["since_ts"].is_number()) {
+            since_ts = static_cast<uint64_t>(params["since_ts"].get<double>());
+        }
+        size_t limit = xbot_monitoring::sensors_history::kSamplesPerSensor;
+        if (params.contains("limit") && params["limit"].is_number_integer()) {
+            int l = params["limit"].get<int>();
+            if (l < 1) l = 1;
+            if (l > static_cast<int>(xbot_monitoring::sensors_history::kSamplesPerSensor)) {
+                l = static_cast<int>(xbot_monitoring::sensors_history::kSamplesPerSensor);
+            }
+            limit = static_cast<size_t>(l);
+        }
+        return sensor_history.list_json(params["sensor_id"].get<std::string>(), since_ts, limit);
+    }),
+    RPC_METHOD("sensors.history_bulk", {
+        // Params (all optional):
+        //   since_ts: number  (epoch ms) — return strictly newer
+        //   limit:    number  (default 7200, clamped to [1, 7200]) — per sensor
+        // Returns: { sensors: { <sensor_id>: [{ts_ms, value}, ...], ... } }
+        std::optional<uint64_t> since_ts;
+        size_t limit = xbot_monitoring::sensors_history::kSamplesPerSensor;
+        if (params.is_object()) {
+            if (params.contains("since_ts") && params["since_ts"].is_number()) {
+                since_ts = static_cast<uint64_t>(params["since_ts"].get<double>());
+            }
+            if (params.contains("limit") && params["limit"].is_number_integer()) {
+                int l = params["limit"].get<int>();
+                if (l < 1) l = 1;
+                if (l > static_cast<int>(xbot_monitoring::sensors_history::kSamplesPerSensor)) {
+                    l = static_cast<int>(xbot_monitoring::sensors_history::kSamplesPerSensor);
+                }
+                limit = static_cast<size_t>(l);
+            }
+        }
+        return sensor_history.list_all_json(since_ts, limit);
+    }),
     RPC_METHOD("system.docker_prune", {
         // Removes all unused (dangling and not-referenced-by-any-container)
         // images on the host. The hardcoded command does not accept any
@@ -1676,6 +1731,17 @@ void subscribe_to_sensor(std::string topic, std::vector<ros::Subscriber> &sensor
                 data["d"] = msg->data;
                 auto bson = json::to_bson(data);
                 try_publish_binary("sensors/" + info.sensor_id + "/bson", bson.data(), bson.size());
+
+                // Mirror into the local ring buffer so sensors.history* can
+                // replay the trailing 1 h on demand. Use the sensor's own
+                // stamp when set, otherwise fall back to wall-clock — the
+                // chart is plotted against ts_ms, not ROS time.
+                uint64_t ts_ms = static_cast<uint64_t>(msg->stamp.toNSec() / 1'000'000ULL);
+                if (ts_ms == 0) {
+                    using namespace std::chrono;
+                    ts_ms = duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count();
+                }
+                sensor_history.push(info.sensor_id, msg->data, ts_ms);
             });
             sensor_data_subscribers.push_back(s);
             break;

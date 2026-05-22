@@ -18,6 +18,7 @@
 #include <mower_msgs/Power.h>
 #include <xbot_msgs/SensorDataString.h>
 
+#include <cmath>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -92,6 +93,11 @@ std::map<std::string, SensorConfig> sensor_configs{
   {"om_mow_motor_current", {"Mow Motor Current", "A", xbot_msgs::SensorInfo::VALUE_DESCRIPTION_CURRENT, xbot_msgs::SensorInfo::TYPE_DOUBLE, [](StatusPtr msg) { return msg->mower_esc_current; }, &set_limits_mow_motor_current, "mower_xesc"}},
   {"om_mow_motor_rpm", {"Mow Motor Revolutions", "rpm", xbot_msgs::SensorInfo::VALUE_DESCRIPTION_RPM, xbot_msgs::SensorInfo::TYPE_DOUBLE, [](StatusPtr msg) { return msg->mower_motor_rpm; }, &set_limits_mow_motor_rpm, "mower_xesc"}},
   {"om_gps_accuracy", {"GPS Accuracy", "m", xbot_msgs::SensorInfo::VALUE_DESCRIPTION_DISTANCE, xbot_msgs::SensorInfo::TYPE_DOUBLE}},
+  {"om_gps_quality", {"GPS Quality", "%", xbot_msgs::SensorInfo::VALUE_DESCRIPTION_PERCENT, xbot_msgs::SensorInfo::TYPE_DOUBLE}},
+  {"om_gps_satellites", {"GPS Satellites", "", xbot_msgs::SensorInfo::VALUE_DESCRIPTION_UNKNOWN, xbot_msgs::SensorInfo::TYPE_DOUBLE}},
+  {"om_gps_pdop", {"GPS PDOP", "", xbot_msgs::SensorInfo::VALUE_DESCRIPTION_UNKNOWN, xbot_msgs::SensorInfo::TYPE_DOUBLE}},
+  {"om_gps_fix_type", {"GPS Fix Type", "", xbot_msgs::SensorInfo::VALUE_DESCRIPTION_UNKNOWN, xbot_msgs::SensorInfo::TYPE_DOUBLE}},
+  {"om_gps_heading_accuracy", {"GPS Heading Accuracy", "deg", xbot_msgs::SensorInfo::VALUE_DESCRIPTION_UNKNOWN, xbot_msgs::SensorInfo::TYPE_DOUBLE}},
 };
 // clang-format on
 
@@ -127,6 +133,19 @@ void high_level_status(const mower_msgs::HighLevelStatus::ConstPtr& msg) {
   state.emergency = msg->emergency;
   state.is_charging = msg->is_charging;
 
+  // Mirror GPS quality into the sensor pipeline so the Sensors page can chart
+  // the long-term percentage. HighLevelStatus does not carry its own stamp,
+  // so use ros::Time::now() — same convention as gps_status_received.
+  {
+    auto sc_it = sensor_configs.find("om_gps_quality");
+    if (sc_it != std::end(sensor_configs)) {
+      xbot_msgs::SensorDataDouble sensor_data;
+      sensor_data.stamp = ros::Time::now();
+      sensor_data.data = static_cast<double>(msg->gps_quality_percent);
+      sc_it->second.data_pub.publish(sensor_data);
+    }
+  }
+
   state_pub.publish(state);
 }
 
@@ -145,6 +164,25 @@ void gps_status_received(const xbot_msgs::GpsStatus::ConstPtr& msg) {
   state.gps_fix_type = msg->fix_type;
   state.gps_satellite_count = msg->satellite_count;
   state.gps_pdop = msg->pdop;
+
+  // Forward the numeric GPS-quality fields into the sensor pipeline so they
+  // can be charted on the Sensors page. xbot_msgs::GpsStatus has no stamp
+  // field, so use ros::Time::now() — matches the existing rate of GpsStatus
+  // (~1 Hz on real hardware) closely enough for charting.
+  {
+    const ros::Time stamp = ros::Time::now();
+    auto publish = [&stamp](const std::string& sensor_id, double value) {
+      auto sc_it = sensor_configs.find(sensor_id);
+      if (sc_it == std::end(sensor_configs)) return;
+      xbot_msgs::SensorDataDouble sensor_data;
+      sensor_data.stamp = stamp;
+      sensor_data.data = value;
+      sc_it->second.data_pub.publish(sensor_data);
+    };
+    publish("om_gps_satellites", static_cast<double>(msg->satellite_count));
+    publish("om_gps_pdop", static_cast<double>(msg->pdop));
+    publish("om_gps_fix_type", static_cast<double>(msg->fix_type));
+  }
 
   // GpsStatus.fix_type: 0=no fix, 1=2D, 2=3D, 3=DGPS/SBAS, 4=RTK float, 5=RTK fixed.
   // Treat fix_type >= 4 as "RTK quality"; anything below is the loss case.
@@ -284,6 +322,20 @@ void pose_received(const xbot_msgs::AbsolutePose::ConstPtr& msg) {
   auto sc_it = sensor_configs.find("om_gps_accuracy");
   if (sc_it != std::end(sensor_configs)) {
     sc_it->second.data_pub.publish(sensor_data);
+  }
+
+  // Heading accuracy is only meaningful when orientation_valid is set; the
+  // backend otherwise publishes a stale or default value that would pollute
+  // the chart. AbsolutePose.orientation_accuracy is in rad — convert to deg
+  // to match the sensor's declared unit.
+  if (msg->orientation_valid) {
+    auto sc_heading_it = sensor_configs.find("om_gps_heading_accuracy");
+    if (sc_heading_it != std::end(sensor_configs)) {
+      xbot_msgs::SensorDataDouble heading_data;
+      heading_data.stamp = msg->header.stamp;
+      heading_data.data = msg->orientation_accuracy * 180.0 / M_PI;
+      sc_heading_it->second.data_pub.publish(heading_data);
+    }
   }
 }
 
