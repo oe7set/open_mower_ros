@@ -646,6 +646,16 @@ void actionReceived(const std_msgs::String::ConstPtr& action) {
     return;
   }
 
+  if (action->data == "mower_logic/set_emergency") {
+    ROS_WARN_STREAM("Got set emergency action.");
+    mower_msgs::EmergencyStopSrv srv;
+    srv.request.emergency = 1;
+    if (!emergencyClient.call(srv)) {
+      ROS_ERROR_STREAM("Failed to call ll/_service/emergency for set_emergency action.");
+    }
+    return;
+  }
+
   if (currentBehavior) {
     currentBehavior->handle_action(action->data);
   }
@@ -664,6 +674,12 @@ void buildRootActions() {
   reset_emergency_action.enabled = true;
   reset_emergency_action.action_name = "Reset Emergency";
   rootActions.push_back(reset_emergency_action);
+
+  xbot_msgs::ActionInfo set_emergency_action;
+  set_emergency_action.action_id = "set_emergency";
+  set_emergency_action.enabled = true;
+  set_emergency_action.action_name = "Set Emergency";
+  rootActions.push_back(set_emergency_action);
 }
 
 int main(int argc, char** argv) {
