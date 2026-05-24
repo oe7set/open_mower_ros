@@ -18,6 +18,8 @@
 
 #include <ros/console.h>
 
+#include <nlohmann/json.hpp>
+
 void HighLevelServiceInterface::highLevelStatusReceived(const mower_msgs::HighLevelStatus::ConstPtr& msg) {
   // Direct cast from ROS state to enum HighLevelStatus
   HighLevelStatus state_id = static_cast<HighLevelStatus>(msg->state);
@@ -46,4 +48,42 @@ void HighLevelServiceInterface::OnActionChanged(const char* new_value, uint32_t 
   // The firmware sent an action string. For now, just log it.
   ROS_INFO_STREAM("HighLevelService received action: " << std::string(new_value, length));
   // TODO: Implement action handling (e.g., publish to xbot/action topic)
+}
+
+void HighLevelServiceInterface::OnFirmwareGitHashChanged(const char* new_value, uint32_t length) {
+  {
+    std::lock_guard<std::mutex> lk(firmware_version_mutex_);
+    firmware_git_hash_.assign(new_value, length);
+  }
+  publishFirmwareVersionIfReady();
+}
+
+void HighLevelServiceInterface::OnFirmwareBuildDateChanged(const char* new_value, uint32_t length) {
+  {
+    std::lock_guard<std::mutex> lk(firmware_version_mutex_);
+    firmware_build_date_.assign(new_value, length);
+  }
+  publishFirmwareVersionIfReady();
+}
+
+void HighLevelServiceInterface::publishFirmwareVersionIfReady() {
+  std::string git_hash;
+  std::string build_date;
+  {
+    std::lock_guard<std::mutex> lk(firmware_version_mutex_);
+    if (firmware_git_hash_.empty() || firmware_build_date_.empty()) {
+      return;
+    }
+    git_hash = firmware_git_hash_;
+    build_date = firmware_build_date_;
+  }
+
+  nlohmann::ordered_json payload = {
+      {"git_hash", git_hash},
+      {"build_date", build_date},
+  };
+  std_msgs::String msg;
+  msg.data = payload.dump();
+  firmware_version_pub_.publish(msg);
+  ROS_INFO_STREAM("HighLevelService firmware version: " << msg.data);
 }

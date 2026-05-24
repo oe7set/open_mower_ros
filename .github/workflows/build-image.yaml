@@ -83,6 +83,17 @@ jobs:
         uses: actions/checkout@v4
         with:
           submodules: 'recursive'
+          # Full history + tags so that `git describe --tags` inside the Docker
+          # build resolves to a real version string instead of falling back to
+          # the bare commit hash.
+          fetch-depth: 0
+
+      - name: Resolve software version string
+        id: om_version
+        run: |
+          OM_VER="$(git describe --tags --always --dirty 2>/dev/null || git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+          echo "Resolved OM_SOFTWARE_VERSION=$OM_VER"
+          echo "OM_SOFTWARE_VERSION=$OM_VER" >> "$GITHUB_OUTPUT"
 
       # Setup Python 3
       - name: Set up Python
@@ -146,6 +157,8 @@ jobs:
           platforms: ${{ matrix.docker_build_arch }}
           no-cache: ${{ inputs.clean_build == true || false }}
           labels: ${{ env.META_LABELS }}
+          build-args: |
+            OM_SOFTWARE_VERSION=${{ steps.om_version.outputs.OM_SOFTWARE_VERSION }}
           outputs: type=image,name=ghcr.io/${{ env.REPOSITORY_LC }},push-by-digest=true,name-canonical=true,push=${{ github.event_name != 'pull_request' }}
           cache-from: type=gha,scope=${{ matrix.os }}-${{ matrix.variant }}
           cache-to: type=gha,scope=${{ matrix.os }}-${{ matrix.variant }},mode=max

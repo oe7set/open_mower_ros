@@ -100,6 +100,13 @@ std::string external_mqtt_topic_prefix = "";
 std::string external_mqtt_port = "";
 std::string version_string = "";
 
+// Firmware version JSON object cached from mower_comms_v2/firmware_version.
+// Empty until the first message arrives (firmware not yet booted, V1 setups
+// without an STM32, etc.). Republished as part of version/json so the app gets
+// a single retained payload covering both backend and firmware.
+std::mutex firmware_version_mutex;
+nlohmann::ordered_json firmware_version_json;
+
 class MqttCallback : public mqtt::callback {
 
     void connected(const mqtt::string &string) override {
@@ -1546,9 +1553,35 @@ void publish_version() {
     json version = {
             {"version", version_string}
     };
+    {
+        std::lock_guard<std::mutex> lk(firmware_version_mutex);
+        if (!firmware_version_json.empty()) {
+            version["firmware"] = firmware_version_json;
+        }
+    }
     try_publish("version/json", version.dump(), true);
     auto bson = json::to_bson(version);
     try_publish_binary("version", bson.data(), bson.size(), true);
+}
+
+void firmware_version_callback(const std_msgs::String::ConstPtr& msg) {
+    nlohmann::ordered_json parsed;
+    try {
+        parsed = nlohmann::ordered_json::parse(msg->data);
+    } catch (const std::exception& e) {
+        ROS_WARN_STREAM("firmware_version: invalid JSON payload: " << e.what());
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lk(firmware_version_mutex);
+        if (firmware_version_json == parsed) {
+            return;
+        }
+        firmware_version_json = std::move(parsed);
+    }
+    // Republish the retained version payload so late MQTT subscribers see the
+    // firmware block without waiting for a backend restart.
+    publish_version();
 }
 
 void publish_capabilities() {
@@ -2069,9 +2102,12 @@ int main(int argc, char **argv) {
     n = new ros::NodeHandle();
     ros::NodeHandle paramNh("~");
 
-    version_string = paramNh.param("software_version", std::string("UNKNOWN VERSION"));
+    // Default carries a hint about *why* the version is unknown so the UI
+    // immediately surfaces a misconfiguration (missing param) rather than the
+    // ambiguous string "UNKNOWN VERSION".
+    version_string = paramNh.param("software_version", std::string("unknown (no software_version param set)"));
     if(version_string.empty()) {
-        version_string = "UNKNOWN VERSION";
+        version_string = "unknown (empty software_version param)";
     }
 
     external_mqtt_enable = paramNh.param("external_mqtt_enable", false);
@@ -2096,6 +2132,11 @@ int main(int argc, char **argv) {
     ros::ServiceServer register_action_service = n->advertiseService("xbot/register_actions", registerActions);
 
     ros::Subscriber robotStateSubscriber = n->subscribe("xbot_monitoring/robot_state", 10, robot_state_callback);
+    // Firmware version is published by HighLevelServiceInterface in mower_comms_v2
+    // as a latched String (JSON: {git_hash, build_date}). Cache + republish via
+    // version/json so the openmower-app sees the full version block.
+    ros::Subscriber firmwareVersionSubscriber = n->subscribe(
+        "mower_comms_v2/firmware_version", 1, firmware_version_callback);
     ros::Subscriber mapSubscriber = n->subscribe("mower_map_service/json_map", 10, map_callback);
     ros::Subscriber mapOverlaySubscriber = n->subscribe("xbot_monitoring/map_overlay", 10, map_overlay_callback);
     // Path-layer bridges. Topics are advertised in their respective publishers

@@ -70,7 +70,16 @@ WORKDIR /opt/open_mower_ros
 
 RUN bash -c "source /opt/ros/$ROS_DISTRO/setup.bash && cd /opt/open_mower_ros/src && catkin_init_workspace && cd .. && source /opt/prebuilt/slic3r_coverage_planner/setup.bash && catkin_make -DCATKIN_BLACKLIST_PACKAGES=slic3r_coverage_planner"
 
-RUN OM_VER="$(git describe --tags 2>/dev/null || git describe --always 2>/dev/null || echo v0.0.0)" && \
+# Capture a software version string for xbot_monitoring to publish on MQTT.
+# Resolution order:
+#   1. OM_SOFTWARE_VERSION build-arg (set by CI / docker compose) — authoritative.
+#   2. `git describe --tags --always --dirty` — works when the build context is a
+#      proper clone with tags fetched (locally or with fetch-depth: 0 in CI).
+#   3. `git rev-parse --short HEAD` — last-resort short hash, still useful.
+#   4. Literal "unknown" — only when no git metadata is present at all.
+ARG OM_SOFTWARE_VERSION=
+RUN OM_VER="${OM_SOFTWARE_VERSION:-$(git describe --tags --always --dirty 2>/dev/null || git rev-parse --short HEAD 2>/dev/null || echo unknown)}" && \
+    echo "Resolved OM_SOFTWARE_VERSION=$OM_VER" && \
     echo "export OM_SOFTWARE_VERSION=$OM_VER" > version_info.env && \
     echo "$OM_VER" > /opt/open_mower_ros/.version_string
 
