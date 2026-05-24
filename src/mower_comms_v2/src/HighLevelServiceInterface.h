@@ -21,10 +21,9 @@
 #include <ros/ros.h>
 #include <std_msgs/String.h>
 
+#include <HighLevelServiceInterfaceBase.hpp>
 #include <mutex>
 #include <string>
-
-#include <HighLevelServiceInterfaceBase.hpp>
 
 class HighLevelServiceInterface : public HighLevelServiceInterfaceBase {
  public:
