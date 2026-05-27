@@ -235,15 +235,18 @@ bool setPose(xbot_positioning::SetPoseSrvRequest &req, xbot_positioning::SetPose
 }
 
 void onPose(const xbot_msgs::AbsolutePose::ConstPtr &msg) {
-  if (!gps_enabled) {
-    return;
-  }
     // Always remember the most recent receiver-reported accuracy, regardless
-    // of fix class. The kalman filter only consumes RTK-Fixed updates (gate
-    // below), but downstream consumers want to see Float/3D/Single accuracy
-    // change in real time when RTK is lost.
+    // of fix class or whether the kalman filter is currently active. The
+    // filter only consumes RTK-Fixed updates (gate below); downstream
+    // consumers (monitoring node, app UI) want to see Float/3D/Single
+    // accuracy change in real time even when IdleBehavior has paused the
+    // filter via setGPS(false).
     last_pose_accuracy = msg->position_accuracy;
     last_pose_accuracy_time = ros::Time::now();
+
+    if (!gps_enabled) {
+        return;
+    }
     // TODO fuse with high covariance?
     if ((msg->flags & (xbot_msgs::AbsolutePose::FLAG_GPS_RTK_FIXED)) == 0) {
         ROS_INFO_STREAM_THROTTLE(1, "Dropped GPS update, since it's not RTK Fixed");

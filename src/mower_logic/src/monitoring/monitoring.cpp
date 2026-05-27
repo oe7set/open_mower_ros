@@ -146,6 +146,16 @@ void high_level_status(const mower_msgs::HighLevelStatus::ConstPtr& msg) {
     }
   }
 
+  // RobotState is published on a fixed-rate timer (publishRobotState) so that
+  // pose/GPS fields keep flowing to the UI even while the high-level state is
+  // idle and HighLevelStatus does not change. No publish here.
+}
+
+// Publishes the aggregated RobotState at a fixed rate so the web UI keeps
+// receiving fresh pose, position accuracy, and GPS metadata regardless of the
+// mower's high-level state. Pose, GPS status and HighLevelStatus all write
+// into the shared `state` buffer; the timer is the single publication point.
+void publishRobotState(const ros::TimerEvent&) {
   state_pub.publish(state);
 }
 
@@ -549,6 +559,9 @@ int main(int argc, char** argv) {
   ros::Subscriber gps_status_subscriber = n->subscribe("/ll/position/gps_status", 10, gps_status_received);
 
   state_pub = n->advertise<xbot_msgs::RobotState>("xbot_monitoring/robot_state", 10);
+
+  // 2 Hz keeps the map marker smooth without overloading the MQTT bridge.
+  ros::Timer state_timer = n->createTimer(ros::Duration(0.5), publishRobotState);
 
   ros::spin();
 
