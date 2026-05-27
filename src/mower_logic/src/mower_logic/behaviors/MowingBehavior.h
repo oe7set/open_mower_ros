@@ -28,6 +28,9 @@ class MowingBehavior : public Behavior {
 
   bool skip_area;
   bool skip_path;
+  // Set when the user requested an abort that should stop in place (transition
+  // back to IdleBehavior) instead of the default behavior of going to dock.
+  bool abort_to_idle;
   bool create_mowing_plan(int area_index);
 
   bool execute_mowing_plan();

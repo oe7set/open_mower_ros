@@ -7,6 +7,7 @@ add_compile_options(-std=c++17)
 
 find_package(catkin REQUIRED COMPONENTS
         xbot_msgs
+        mower_msgs
         roscpp
         roslib
         geometry_msgs

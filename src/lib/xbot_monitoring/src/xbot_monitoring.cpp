@@ -48,6 +48,7 @@
 #include "xbot_msgs/RegisterActionsSrv.h"
 #include "xbot_msgs/ActionInfo.h"
 #include "xbot_msgs/MapOverlay.h"
+#include "mower_msgs/HighLevelControlSrv.h"
 #include "xbot_rpc/RpcError.h"
 #include "xbot_rpc/RpcRequest.h"
 #include "xbot_rpc/RpcResponse.h"
@@ -1394,6 +1395,31 @@ xbot_rpc::RpcProvider rpc_provider("xbot_monitoring", {{
             }
         }
         return sensor_history.list_all_json(since_ts, limit);
+    }),
+    RPC_METHOD("mower.return_home", {
+        // State-agnostic "go home now" — bridges to mower_logic's
+        // HighLevelControlSrv with COMMAND_HOME so it works from idle, mowing,
+        // and area-recording alike. The service handler in mower_logic.cpp
+        // routes the call into the active behavior's command_home() override.
+        // The service client is cached in a static local so we don't re-resolve
+        // it on every call (the rpc_provider is constructed before NodeHandle
+        // is available, so we can't init it eagerly).
+        static ros::ServiceClient client;
+        if (!client) {
+            client = n->serviceClient<mower_msgs::HighLevelControlSrv>(
+                "mower_service/high_level_control");
+        }
+        if (!client.waitForExistence(ros::Duration(1.0))) {
+            throw xbot_rpc::RpcException(xbot_rpc::RpcError::ERROR_INTERNAL,
+                                          "mower_service/high_level_control not available");
+        }
+        mower_msgs::HighLevelControlSrv srv;
+        srv.request.command = mower_msgs::HighLevelControlSrv::Request::COMMAND_HOME;
+        if (!client.call(srv)) {
+            throw xbot_rpc::RpcException(xbot_rpc::RpcError::ERROR_INTERNAL,
+                                          "Failed to call mower_service/high_level_control");
+        }
+        return json::object({{"ok", true}});
     }),
     RPC_METHOD("system.docker_prune", {
         // Removes all unused (dangling and not-referenced-by-any-container)

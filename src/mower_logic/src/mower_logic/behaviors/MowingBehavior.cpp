@@ -24,6 +24,8 @@
 #include <cmath>
 #include <event_publisher/event_publisher.hpp>
 
+#include "DockingBehavior.h"
+#include "IdleBehavior.h"
 #include "mower_logic/CheckPoint.h"
 #include "mower_map/ClearNavPointSrv.h"
 #include "mower_map/GetMowingAreaSrv.h"
@@ -88,13 +90,19 @@ Behavior* MowingBehavior::execute() {
     // something went wrong
     return nullptr;
   }
-  // we got aborted, go to docking station
+  // We got aborted. The default abort path goes to docking; abort_to_idle
+  // requests an in-place stop and returns to idle so the user can intervene
+  // (e.g. carry the mower) without the autopilot driving away first.
+  if (abort_to_idle) {
+    return &IdleBehavior::INSTANCE;
+  }
   return &DockingBehavior::INSTANCE;
 }
 
 void MowingBehavior::enter() {
   skip_area = false;
   skip_path = false;
+  abort_to_idle = false;
   paused = aborted = false;
 
   // map.start_in_area RPC stashes the requested mowing-area index here. Pick
@@ -675,6 +683,11 @@ MowingBehavior::MowingBehavior() {
   abort_mowing_action.enabled = false;
   abort_mowing_action.action_name = "Stop Mowing";
 
+  xbot_msgs::ActionInfo abort_to_idle_action;
+  abort_to_idle_action.action_id = "abort_to_idle";
+  abort_to_idle_action.enabled = false;
+  abort_to_idle_action.action_name = "Stop";
+
   xbot_msgs::ActionInfo skip_area_action;
   skip_area_action.action_id = "skip_area";
   skip_area_action.enabled = false;
@@ -689,6 +702,7 @@ MowingBehavior::MowingBehavior() {
   actions.push_back(pause_action);
   actions.push_back(continue_action);
   actions.push_back(abort_mowing_action);
+  actions.push_back(abort_to_idle_action);
   actions.push_back(skip_area_action);
   actions.push_back(skip_path_action);
   restore_checkpoint();
@@ -704,6 +718,17 @@ void MowingBehavior::handle_action(std::string action) {
   } else if (action == "mower_logic:mowing/abort_mowing") {
     ROS_INFO_STREAM("got abort mowing command");
     command_home();
+  } else if (action == "mower_logic:mowing/abort_to_idle") {
+    // Stop mowing and return to idle without driving to the dock. We must not
+    // mark the semiautomatic task as paused (that would auto-resume mowing
+    // after the next dock cycle); leaving the active flag intact and aborting
+    // is enough — execute() routes us to IdleBehavior via abort_to_idle.
+    ROS_INFO_STREAM("got abort to idle command");
+    abort_to_idle = true;
+    if (paused) {
+      this->requestContinue();
+    }
+    this->abort();
   } else if (action == "mower_logic:mowing/skip_area") {
     ROS_INFO_STREAM("got skip_area command");
     skip_area = true;
