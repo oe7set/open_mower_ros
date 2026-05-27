@@ -37,8 +37,8 @@ class DockingBehavior : public Behavior {
  private:
   std::vector<xbot_msgs::ActionInfo> actions;
 
-  uint retryCount;
-  bool inApproachMode;
+  uint retryCount = 0;
+  bool inApproachMode = false;
   geometry_msgs::PoseStamped docking_pose_stamped;
 
   bool approach_docking_point();
