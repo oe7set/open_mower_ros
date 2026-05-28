@@ -2,10 +2,13 @@
 // Created by Clemens Elflein on 22.11.22.
 // Copyright (c) 2022 Clemens Elflein. All rights reserved.
 //
+#include <array>
 #include <atomic>
 #include <cctype>
 #include <cerrno>
 #include <chrono>
+#include <cmath>
+#include <condition_variable>
 #include <csignal>
 #include <mutex>
 #include <cstdio>
@@ -38,6 +41,7 @@
 #include "xbot_msgs/SensorDataString.h"
 #include "xbot_msgs/SensorDataDouble.h"
 #include "xbot_msgs/RobotState.h"
+#include "sensor_msgs/Imu.h"
 #include <mqtt/async_client.h>
 #include <nlohmann/json.hpp>
 #include <vector>
@@ -760,6 +764,23 @@ static bool read_uptime_seconds(double& uptime_out) {
     return static_cast<bool>(f);
 }
 
+// Calibration collector for the imu.calibrate_level RPC. The RPC arms the
+// collector and waits on the condition variable; the raw-IMU subscriber
+// (imu_raw_callback) appends samples until the target count is reached,
+// then notifies the waiter. Keeping the buffer on the *raw* topic
+// (ll/imu/data_raw) — not the orientation-filtered one — guarantees the
+// measured bias/tilt reflects the actual sensor state, free of Madgwick
+// feedback. Declared here, before rpc_provider, so the lambda inside the
+// RPC method list can reference it via unqualified name lookup.
+struct ImuCalibrationCollector {
+    std::mutex mtx;
+    std::condition_variable cv;
+    bool active = false;
+    size_t target = 0;
+    std::vector<std::array<double, 6>> samples;  // ax, ay, az, gx, gy, gz
+};
+ImuCalibrationCollector imu_calibration_collector;
+
 xbot_rpc::RpcProvider rpc_provider("xbot_monitoring", {{
     RPC_METHOD("rpc.ping", {
         return "pong";
@@ -1396,6 +1417,192 @@ xbot_rpc::RpcProvider rpc_provider("xbot_monitoring", {{
         }
         return sensor_history.list_all_json(since_ts, limit);
     }),
+    RPC_METHOD("imu.calibrate_level", {
+        // "Treat current pose as level" calibration. The mower must be parked
+        // on flat ground, motionless, with the chassis at its real-world
+        // resting orientation. We average ll/imu/data_raw for ~2 s, derive:
+        //   - mounting roll/pitch from the gravity vector in the IMU frame
+        //   - gyro bias x/y/z from the mean angular velocity
+        // and persist them under ll.services.imu.* via the same atomic-write
+        // pipeline meta.config.set uses, so a stack restart is not required.
+        // Yaw is *not* part of the calibration: drift is corrected continuously
+        // from /xbot_positioning/xb_pose inside imu_orientation_filter.
+        constexpr size_t kTargetSamples = 200;
+        constexpr auto kMaxWait = std::chrono::seconds(4);
+        constexpr double kAccelStddevThreshold = 0.10;   // m/s^2 per axis
+        constexpr double kGyroStddevThreshold = 0.02;    // rad/s per axis
+
+        // Arm the collector and wait for the raw subscriber to fill the
+        // buffer. The mutex serialises against imu_raw_callback; the cv lets
+        // the callback wake us as soon as the target count is reached.
+        {
+            std::lock_guard<std::mutex> lk(imu_calibration_collector.mtx);
+            imu_calibration_collector.samples.clear();
+            imu_calibration_collector.samples.reserve(kTargetSamples);
+            imu_calibration_collector.target = kTargetSamples;
+            imu_calibration_collector.active = true;
+        }
+
+        std::vector<std::array<double, 6>> samples;
+        {
+            std::unique_lock<std::mutex> lk(imu_calibration_collector.mtx);
+            imu_calibration_collector.cv.wait_for(lk, kMaxWait, [] {
+                return imu_calibration_collector.samples.size() >= imu_calibration_collector.target;
+            });
+            imu_calibration_collector.active = false;
+            samples = std::move(imu_calibration_collector.samples);
+            imu_calibration_collector.samples.clear();
+        }
+
+        if (samples.size() < kTargetSamples / 2) {
+            // Less than ~1 s of data — the raw IMU topic is probably down.
+            throw xbot_rpc::RpcException(
+                xbot_rpc::RpcError::ERROR_INTERNAL,
+                std::string("Only ") + std::to_string(samples.size()) +
+                    " IMU samples received in " + std::to_string(kMaxWait.count()) +
+                    "s — is ll/imu/data_raw publishing?");
+        }
+
+        // Mean and stddev per axis. We compute stddev with the two-pass
+        // formulation (mean first, squared deviations second) — Welford would
+        // be marginally more numerically stable but the value range here
+        // (|a| ~ 10, |g| ~ 0.01) is well within double precision.
+        std::array<double, 6> mean{};
+        for (const auto& s : samples) {
+            for (size_t i = 0; i < 6; ++i) mean[i] += s[i];
+        }
+        for (double& m : mean) m /= static_cast<double>(samples.size());
+
+        std::array<double, 6> var{};
+        for (const auto& s : samples) {
+            for (size_t i = 0; i < 6; ++i) {
+                double d = s[i] - mean[i];
+                var[i] += d * d;
+            }
+        }
+        for (double& v : var) v /= static_cast<double>(samples.size());
+        std::array<double, 6> stddev{};
+        for (size_t i = 0; i < 6; ++i) stddev[i] = std::sqrt(var[i]);
+
+        // Per-axis check: if any axis exceeds the threshold the mower moved
+        // during the recording. The thresholds are loose enough to tolerate
+        // sensor noise on a still mower (LSM6DS3TR-C @ 100 Hz) but tight
+        // enough to catch a hand-shake.
+        const double accel_max = std::max({stddev[0], stddev[1], stddev[2]});
+        const double gyro_max = std::max({stddev[3], stddev[4], stddev[5]});
+        if (accel_max > kAccelStddevThreshold || gyro_max > kGyroStddevThreshold) {
+            json err_data;
+            err_data["accel_stddev"] = json::array({stddev[0], stddev[1], stddev[2]});
+            err_data["gyro_stddev"] = json::array({stddev[3], stddev[4], stddev[5]});
+            err_data["accel_threshold"] = kAccelStddevThreshold;
+            err_data["gyro_threshold"] = kGyroStddevThreshold;
+            err_data["samples_count"] = samples.size();
+            throw xbot_rpc::RpcException(
+                xbot_rpc::RpcError::ERROR_INTERNAL,
+                std::string("MOWER_NOT_STILL: accel_stddev_max=") +
+                    std::to_string(accel_max) + " rad/s^2, gyro_stddev_max=" +
+                    std::to_string(gyro_max) + " rad/s — " + err_data.dump());
+        }
+
+        // Mounting offsets from the gravity vector. With the mower on a flat
+        // surface, the only acceleration the IMU sees is g pointing in -Z
+        // (REP-103 body frame: X forward, Y left, Z up). The remap baked in
+        // ll.services.imu.axis_config (default "+X-Y-Z") already brings the
+        // raw chip axes into this frame. Any deviation of (ax, ay, az) from
+        // (0, 0, +g) is the mounting tilt:
+        //   roll  = atan2( ay, az )         (rotation around X, +Y up tilts +)
+        //   pitch = atan2(-ax, sqrt(ay^2 + az^2))  (rotation around Y)
+        // These offsets are subtracted at the filter *output* so the raw
+        // sensor stream stays untouched.
+        const double ax = mean[0], ay = mean[1], az = mean[2];
+        const double mounting_roll = std::atan2(ay, az);
+        const double mounting_pitch = std::atan2(-ax, std::sqrt(ay * ay + az * az));
+        const double gyro_bias_x = mean[3];
+        const double gyro_bias_y = mean[4];
+        const double gyro_bias_z = mean[5];
+
+        // Persist via the same write pipeline meta.config.set uses: serialise
+        // on config_write_mutex, write all five paths into the in-memory tree,
+        // atomic-write to disk with a .bak rollback, then push into the live
+        // ros::param tree so imu_orientation_filter sees the new offsets on
+        // its next dynamic_reconfigure poll (or, failing that, restart).
+        try {
+            std::lock_guard<std::mutex> config_lk(config_write_mutex);
+            const std::string user_path = get_user_yaml_path();
+            json user_yaml;
+            try {
+                user_yaml = xbot_monitoring::yaml_io::read_yaml_file(user_path);
+            } catch (...) {
+                user_yaml = json::object();
+            }
+            if (!user_yaml.is_object()) user_yaml = json::object();
+
+            xbot_monitoring::yaml_io::write_path(user_yaml,
+                "ll.services.imu.mounting_roll_offset_rad", mounting_roll);
+            xbot_monitoring::yaml_io::write_path(user_yaml,
+                "ll.services.imu.mounting_pitch_offset_rad", mounting_pitch);
+            xbot_monitoring::yaml_io::write_path(user_yaml,
+                "ll.services.imu.gyro_bias.x", gyro_bias_x);
+            xbot_monitoring::yaml_io::write_path(user_yaml,
+                "ll.services.imu.gyro_bias.y", gyro_bias_y);
+            xbot_monitoring::yaml_io::write_path(user_yaml,
+                "ll.services.imu.gyro_bias.z", gyro_bias_z);
+
+            const std::string backup_path = user_path + ".bak";
+            std::error_code ec;
+            std::filesystem::copy_file(
+                user_path, backup_path,
+                std::filesystem::copy_options::overwrite_existing, ec);
+            if (ec) {
+                ROS_WARN_STREAM("imu.calibrate_level: could not back up " << user_path
+                                << " to " << backup_path << ": " << ec.message());
+            }
+
+            xbot_monitoring::yaml_io::write_yaml_file_atomic(user_path, user_yaml);
+
+            try {
+                json verify = xbot_monitoring::yaml_io::read_yaml_file(user_path);
+                if (!verify.is_object()) {
+                    throw std::runtime_error("post-write YAML did not parse to an object");
+                }
+            } catch (const std::exception& verify_err) {
+                ROS_ERROR_STREAM("imu.calibrate_level: post-write verification failed: "
+                                 << verify_err.what() << "; rolling back from " << backup_path);
+                std::filesystem::copy_file(
+                    backup_path, user_path,
+                    std::filesystem::copy_options::overwrite_existing, ec);
+                throw std::runtime_error(
+                    std::string("post-write verification failed: ") + verify_err.what());
+            }
+
+            apply_to_ros_param("ll.services.imu.mounting_roll_offset_rad", mounting_roll);
+            apply_to_ros_param("ll.services.imu.mounting_pitch_offset_rad", mounting_pitch);
+            apply_to_ros_param("ll.services.imu.gyro_bias.x", gyro_bias_x);
+            apply_to_ros_param("ll.services.imu.gyro_bias.y", gyro_bias_y);
+            apply_to_ros_param("ll.services.imu.gyro_bias.z", gyro_bias_z);
+        } catch (const std::exception& e) {
+            throw xbot_rpc::RpcException(xbot_rpc::RpcError::ERROR_INTERNAL,
+                                          std::string("Failed to persist IMU calibration: ") + e.what());
+        }
+
+        ROS_INFO_STREAM("imu.calibrate_level: roll=" << mounting_roll
+                        << " pitch=" << mounting_pitch
+                        << " bias=(" << gyro_bias_x << "," << gyro_bias_y << "," << gyro_bias_z << ")"
+                        << " from " << samples.size() << " samples");
+
+        json result;
+        result["mounting_roll_offset_rad"] = mounting_roll;
+        result["mounting_pitch_offset_rad"] = mounting_pitch;
+        result["gyro_bias"] = json::object({
+            {"x", gyro_bias_x},
+            {"y", gyro_bias_y},
+            {"z", gyro_bias_z},
+        });
+        result["samples_count"] = samples.size();
+        result["accel_stddev"] = json::array({stddev[0], stddev[1], stddev[2]});
+        result["gyro_stddev"] = json::array({stddev[3], stddev[4], stddev[5]});
+        return result;
+    }),
     RPC_METHOD("mower.return_home", {
         // State-agnostic "go home now" — bridges to mower_logic's
         // HighLevelControlSrv with COMMAND_HOME so it works from idle, mowing,
@@ -1860,6 +2067,58 @@ void robot_state_callback(const xbot_msgs::RobotState::ConstPtr &msg) {
     try_publish_binary("robot_state/bson", bson.data(), bson.size());
 }
 
+// Calibration collector lives near the top (see declaration above
+// rpc_provider) so the imu.calibrate_level lambda can reference it via
+// unqualified name lookup. The callback is defined here, after sensor_msgs
+// includes have all been resolved.
+void imu_raw_callback(const sensor_msgs::Imu::ConstPtr &msg) {
+    std::lock_guard<std::mutex> lk(imu_calibration_collector.mtx);
+    if (!imu_calibration_collector.active) return;
+    imu_calibration_collector.samples.push_back({
+        msg->linear_acceleration.x, msg->linear_acceleration.y, msg->linear_acceleration.z,
+        msg->angular_velocity.x, msg->angular_velocity.y, msg->angular_velocity.z,
+    });
+    if (imu_calibration_collector.samples.size() >= imu_calibration_collector.target) {
+        imu_calibration_collector.cv.notify_all();
+    }
+}
+
+// Bridge for the Madgwick-filtered IMU stream. The filter publishes at the
+// sensor's native ~100 Hz; for the live UI 30 Hz is plenty and saves about
+// two thirds of the WebSocket bandwidth. We use the message's own header
+// stamp for throttling so a paused or slow filter does not get amplified by
+// wall-clock jitter on the bridge side.
+void imu_data_callback(const sensor_msgs::Imu::ConstPtr &msg) {
+    constexpr double kPublishPeriodSeconds = 1.0 / 30.0;
+    static ros::Time last_publish_stamp(0, 0);
+
+    const ros::Time stamp = msg->header.stamp.isZero() ? ros::Time::now() : msg->header.stamp;
+    if (!last_publish_stamp.isZero() && (stamp - last_publish_stamp).toSec() < kPublishPeriodSeconds) {
+        return;
+    }
+    last_publish_stamp = stamp;
+
+    json payload;
+    payload["ax"] = msg->linear_acceleration.x;
+    payload["ay"] = msg->linear_acceleration.y;
+    payload["az"] = msg->linear_acceleration.z;
+    payload["gx"] = msg->angular_velocity.x;
+    payload["gy"] = msg->angular_velocity.y;
+    payload["gz"] = msg->angular_velocity.z;
+    payload["qw"] = msg->orientation.w;
+    payload["qx"] = msg->orientation.x;
+    payload["qy"] = msg->orientation.y;
+    payload["qz"] = msg->orientation.z;
+    // Wall-clock millisecond stamp so the App can compute dt for charts
+    // even when the ROS stamp clock differs from the browser clock.
+    payload["ts_ms"] = static_cast<int64_t>(stamp.toNSec() / 1000000);
+
+    json envelope;
+    envelope["d"] = payload;
+    auto bson = json::to_bson(envelope);
+    try_publish_binary("imu/stream", bson.data(), bson.size());
+}
+
 void publish_actions() {
     json actions = json::array();
     {
@@ -2158,6 +2417,13 @@ int main(int argc, char **argv) {
     ros::ServiceServer register_action_service = n->advertiseService("xbot/register_actions", registerActions);
 
     ros::Subscriber robotStateSubscriber = n->subscribe("xbot_monitoring/robot_state", 10, robot_state_callback);
+    // Bridge the orientation-filtered IMU stream (sensor_msgs/Imu with
+    // populated quaternion) to MQTT as throttled BSON for the openmower-app
+    // 3D viewer. See imu_orientation_filter package for the publisher side.
+    ros::Subscriber imuDataSubscriber = n->subscribe("imu/data", 50, imu_data_callback);
+    // Raw IMU subscription used exclusively by imu.calibrate_level. Always
+    // active but a no-op until the RPC arms the collector.
+    ros::Subscriber imuRawSubscriber = n->subscribe("ll/imu/data_raw", 50, imu_raw_callback);
     // Firmware version is published by HighLevelServiceInterface in mower_comms_v2
     // as a latched String (JSON: {git_hash, build_date}). Cache + republish via
     // version/json so the openmower-app sees the full version block.

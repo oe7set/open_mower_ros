@@ -170,6 +170,66 @@
           "x-environment-variable": "OM_CHARGE_CRITICAL_HIGH_CURRENT",
           "x-unit": "A",
           "x-restart-required": "service"
+        },
+        "imu_mounting_roll_offset_rad": {
+          "type": "number",
+          "title": "IMU Mounting Roll Offset",
+          "description": "Roll offset (radians) applied at the orientation-filter output to compensate the IMU mounting tilt. Populated automatically by the 'Use as level position' calibration; rarely edited by hand.",
+          "default": 0.0,
+          "minimum": -0.5,
+          "maximum": 0.5,
+          "x-source": "yaml-user",
+          "x-yaml-path": "ll.services.imu.mounting_roll_offset_rad",
+          "x-unit": "rad",
+          "x-restart-required": "service"
+        },
+        "imu_mounting_pitch_offset_rad": {
+          "type": "number",
+          "title": "IMU Mounting Pitch Offset",
+          "description": "Pitch offset (radians) applied at the orientation-filter output to compensate the IMU mounting tilt. Populated automatically by the 'Use as level position' calibration; rarely edited by hand.",
+          "default": 0.0,
+          "minimum": -0.5,
+          "maximum": 0.5,
+          "x-source": "yaml-user",
+          "x-yaml-path": "ll.services.imu.mounting_pitch_offset_rad",
+          "x-unit": "rad",
+          "x-restart-required": "service"
+        },
+        "imu_gyro_bias_x": {
+          "type": "number",
+          "title": "Gyro Bias X",
+          "description": "Per-axis gyro zero-rate bias subtracted at the filter input. Populated by the 'Use as level position' calibration.",
+          "default": 0.0,
+          "minimum": -0.2,
+          "maximum": 0.2,
+          "x-source": "yaml-user",
+          "x-yaml-path": "ll.services.imu.gyro_bias.x",
+          "x-unit": "rad/s",
+          "x-restart-required": "service"
+        },
+        "imu_gyro_bias_y": {
+          "type": "number",
+          "title": "Gyro Bias Y",
+          "description": "Per-axis gyro zero-rate bias subtracted at the filter input. Populated by the 'Use as level position' calibration.",
+          "default": 0.0,
+          "minimum": -0.2,
+          "maximum": 0.2,
+          "x-source": "yaml-user",
+          "x-yaml-path": "ll.services.imu.gyro_bias.y",
+          "x-unit": "rad/s",
+          "x-restart-required": "service"
+        },
+        "imu_gyro_bias_z": {
+          "type": "number",
+          "title": "Gyro Bias Z",
+          "description": "Per-axis gyro zero-rate bias subtracted at the filter input. Populated by the 'Use as level position' calibration.",
+          "default": 0.0,
+          "minimum": -0.2,
+          "maximum": 0.2,
+          "x-source": "yaml-user",
+          "x-yaml-path": "ll.services.imu.gyro_bias.z",
+          "x-unit": "rad/s",
+          "x-restart-required": "service"
         }
       }
     },

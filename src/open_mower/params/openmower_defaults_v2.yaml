@@ -12,6 +12,18 @@ ll:
       absolute_coords: true
     imu:
       axis_config: "+X-Y-Z"
+      # Mounting offsets in radians, applied at the orientation-filter output
+      # to compensate for the chassis-vs-IMU tilt baked into the install.
+      # Populated by the imu.calibrate_level RPC; manual editing is allowed.
+      mounting_roll_offset_rad: 0.0
+      mounting_pitch_offset_rad: 0.0
+      # Per-axis gyro bias in rad/s, subtracted at the filter input before
+      # Madgwick integration. Largest single source of yaw drift on a still
+      # mower — populated automatically by imu.calibrate_level.
+      gyro_bias:
+        x: 0.0
+        y: 0.0
+        z: 0.0
     power:
       battery_critical_high_voltage: -1
       charge_critical_high_voltage: -1

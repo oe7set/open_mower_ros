@@ -1,0 +1,9 @@
+<launch>
+    <node pkg="imu_orientation_filter" type="imu_orientation_filter_node" name="imu_orientation_filter"
+          output="screen" respawn="true" respawn_delay="5">
+        <param name="beta" value="0.1"/>
+        <param name="yaw_blend" value="0.05"/>
+        <param name="max_yaw_accuracy_rad" value="0.2"/>
+        <param name="frame_id" value="base_link"/>
+    </node>
+</launch>

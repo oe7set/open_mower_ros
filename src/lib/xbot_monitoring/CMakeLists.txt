@@ -12,6 +12,7 @@ find_package(catkin REQUIRED COMPONENTS
         roslib
         geometry_msgs
         nav_msgs
+        sensor_msgs
         std_msgs
         visualization_msgs
         grid_map_core

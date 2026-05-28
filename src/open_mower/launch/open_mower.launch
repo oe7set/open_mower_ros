@@ -6,6 +6,10 @@
          exist" warnings for the first few seconds until xbot_positioning publishes
          its first pose. -->
     <include file="$(find open_mower)/launch/include/_localization.launch"/>
+    <!-- Madgwick 6-DOF orientation filter for the low-level IMU. Runs after
+         _localization so xbot_positioning is already publishing xb_pose by the
+         time the filter looks for a yaw-correction reference. -->
+    <include file="$(find imu_orientation_filter)/launch/imu_orientation_filter.launch"/>
     <include file="$(find open_mower)/launch/include/_move_base.launch"/>
     <include file="$(find open_mower)/launch/include/_teleop.launch"/>
     <include file="$(find open_mower)/launch/include/_record.launch">
