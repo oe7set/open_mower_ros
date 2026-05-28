@@ -4,7 +4,8 @@
 
 namespace imu_orientation_filter {
 
-MadgwickAhrs::MadgwickAhrs() : q0_(1.0), q1_(0.0), q2_(0.0), q3_(0.0), beta_(0.1), initialised_(false) {}
+MadgwickAhrs::MadgwickAhrs() : q0_(1.0), q1_(0.0), q2_(0.0), q3_(0.0), beta_(0.1), initialised_(false) {
+}
 
 void MadgwickAhrs::setBeta(double beta) {
   beta_ = beta;
@@ -91,10 +92,10 @@ void MadgwickAhrs::update(double gx, double gy, double gz, double ax, double ay,
 
     // Gradient descent algorithm corrective step.
     double s0 = _4q0 * q2q2 + _2q2 * ax_n + _4q0 * q1q1 - _2q1 * ay_n;
-    double s1 = _4q1 * q3q3 - _2q3 * ax_n + 4.0 * q0q0 * q1_ - _2q0 * ay_n - _4q1 + _8q1 * q1q1 + _8q1 * q2q2 +
-                _4q1 * az_n;
-    double s2 = 4.0 * q0q0 * q2_ + _2q0 * ax_n + _4q2 * q3q3 - _2q3 * ay_n - _4q2 + _8q2 * q1q1 + _8q2 * q2q2 +
-                _4q2 * az_n;
+    double s1 =
+        _4q1 * q3q3 - _2q3 * ax_n + 4.0 * q0q0 * q1_ - _2q0 * ay_n - _4q1 + _8q1 * q1q1 + _8q1 * q2q2 + _4q1 * az_n;
+    double s2 =
+        4.0 * q0q0 * q2_ + _2q0 * ax_n + _4q2 * q3q3 - _2q3 * ay_n - _4q2 + _8q2 * q1q1 + _8q2 * q2q2 + _4q2 * az_n;
     double s3 = 4.0 * q1q1 * q3_ - _2q1 * ax_n + 4.0 * q2q2 * q3_ - _2q2 * ay_n;
 
     const double s_norm_sq = s0 * s0 + s1 * s1 + s2 * s2 + s3 * s3;

@@ -57,14 +57,12 @@ class ImuOrientationFilterNode {
     // Re-read the mounting/bias params at 1 Hz so a successful imu.calibrate_level
     // RPC takes effect without a node restart. The cost is negligible (five
     // param-server reads per second) and the lag is well below human perception.
-    param_reload_timer_ = nh_.createTimer(ros::Duration(1.0),
-                                          &ImuOrientationFilterNode::reloadCalibrationParams, this);
+    param_reload_timer_ = nh_.createTimer(ros::Duration(1.0), &ImuOrientationFilterNode::reloadCalibrationParams, this);
 
     ROS_INFO_STREAM("imu_orientation_filter started (beta=" << beta_ << ", yaw_blend=" << yaw_blend_
                                                             << ", max_yaw_acc=" << max_yaw_accuracy_rad_ << " rad)");
     if (mounting_roll_offset_ != 0.0 || mounting_pitch_offset_ != 0.0) {
-      ROS_INFO("Applying mounting offset roll=%.4f rad, pitch=%.4f rad", mounting_roll_offset_,
-               mounting_pitch_offset_);
+      ROS_INFO("Applying mounting offset roll=%.4f rad, pitch=%.4f rad", mounting_roll_offset_, mounting_pitch_offset_);
     }
     if (gyro_bias_x_ != 0.0 || gyro_bias_y_ != 0.0 || gyro_bias_z_ != 0.0) {
       ROS_INFO("Applying gyro bias [%.5f, %.5f, %.5f] rad/s", gyro_bias_x_, gyro_bias_y_, gyro_bias_z_);
@@ -124,15 +122,15 @@ class ImuOrientationFilterNode {
     nh_.getParam("ll/services/imu/gyro_bias/x", bx);
     nh_.getParam("ll/services/imu/gyro_bias/y", by);
     nh_.getParam("ll/services/imu/gyro_bias/z", bz);
-    if (roll != mounting_roll_offset_ || pitch != mounting_pitch_offset_ || bx != gyro_bias_x_ ||
-        by != gyro_bias_y_ || bz != gyro_bias_z_) {
+    if (roll != mounting_roll_offset_ || pitch != mounting_pitch_offset_ || bx != gyro_bias_x_ || by != gyro_bias_y_ ||
+        bz != gyro_bias_z_) {
       mounting_roll_offset_ = roll;
       mounting_pitch_offset_ = pitch;
       gyro_bias_x_ = bx;
       gyro_bias_y_ = by;
       gyro_bias_z_ = bz;
-      ROS_INFO("imu_orientation_filter: reloaded calibration (roll=%.4f pitch=%.4f bias=[%.5f, %.5f, %.5f])",
-               roll, pitch, bx, by, bz);
+      ROS_INFO("imu_orientation_filter: reloaded calibration (roll=%.4f pitch=%.4f bias=[%.5f, %.5f, %.5f])", roll,
+               pitch, bx, by, bz);
     }
   }
 

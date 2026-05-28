@@ -42,10 +42,18 @@ class MadgwickAhrs {
 
   // Output accessors. Quaternion order is (w, x, y, z), Hamilton
   // convention, body-to-world.
-  double qw() const { return q0_; }
-  double qx() const { return q1_; }
-  double qy() const { return q2_; }
-  double qz() const { return q3_; }
+  double qw() const {
+    return q0_;
+  }
+  double qx() const {
+    return q1_;
+  }
+  double qy() const {
+    return q2_;
+  }
+  double qz() const {
+    return q3_;
+  }
 
  private:
   void normalise();
