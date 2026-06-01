@@ -26,6 +26,7 @@
 #include "event_publisher/event_publisher.hpp"
 #include "mower_logic/MowerLogicConfig.h"
 #include "mower_logic/PowerConfig.h"
+#include "mower_logic/utils.h"
 #include "mower_msgs/HighLevelStatus.h"
 #include "mower_msgs/Status.h"
 #include "ros/ros.h"
@@ -357,7 +358,7 @@ void power_received(const mower_msgs::Power::ConstPtr& msg) {
   {
     xbot_msgs::SensorDataDouble sensor_data;
     sensor_data.stamp = msg->stamp;
-    sensor_data.data = msg->charge_voltage_chg > 0.0 ? msg->charge_voltage_chg : msg->charge_voltage_adc;
+    sensor_data.data = utils::GetFirstValid({msg->charge_voltage, msg->charge_voltage_adc});
 
     auto sc_it = sensor_configs.find("om_v_charge");
     if (sc_it != std::end(sensor_configs)) {
@@ -367,7 +368,7 @@ void power_received(const mower_msgs::Power::ConstPtr& msg) {
   {
     xbot_msgs::SensorDataDouble sensor_data;
     sensor_data.stamp = msg->stamp;
-    sensor_data.data = msg->battery_voltage_chg > 0.0 ? msg->battery_voltage_chg : msg->battery_voltage_adc;
+    sensor_data.data = utils::GetFirstValid({msg->battery_voltage, msg->battery_voltage_adc});
 
     auto sc_it = sensor_configs.find("om_v_battery");
     if (sc_it != std::end(sensor_configs)) {
