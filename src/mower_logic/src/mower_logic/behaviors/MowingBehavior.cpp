@@ -438,9 +438,8 @@ bool MowingBehavior::create_mowing_plan(int area_index) {
   // no usable infill for (part of) the area. Surface that so the user understands why a
   // scheduled/parametrised run did not mow the pattern they picked on this area.
   if (pathSrv.response.fill_fallback) {
-    ROS_WARN_STREAM("MowingBehavior: requested fill pattern " << fill_type
-                                                              << " produced no infill on area " << area_index
-                                                              << "; planner fell back to linear fill");
+    ROS_WARN_STREAM("MowingBehavior: requested fill pattern " << fill_type << " produced no infill on area "
+                                                              << area_index << "; planner fell back to linear fill");
     open_mower::events::EventPublisher::warning(
         "mowing.fill_fallback", "Requested mow pattern produced no infill; used linear fill instead",
         {{"area_index", area_index}, {"requested_fill", fill_type}, {"run_id", requestedRunId}});
