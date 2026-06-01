@@ -100,8 +100,8 @@ ABORT_ACTION_ID = "mower_logic:mowing/abort_mowing"
 # that map.start_in_area writes to. MowingBehavior resets it to -1 after use.
 NEXT_AREA_PARAM = "/mower_logic/next_area_index"
 # Namespace for the richer per-run dispatch block the scheduler writes before
-# firing: <ns>/area_indices (int[]), and (later phases) /pattern, /angle_deg,
-# /speed_mps, /stop_at_epoch, /run_id. MowingBehavior consumes and clears
+# firing: <ns>/area_indices (int[]), /pattern, /angle_deg, /speed_mps,
+# /outline_count, /stop_at_epoch, /run_id. MowingBehavior consumes and clears
 # area_indices on entry.
 NEXT_RUN_PARAM = "/mower_logic/next_run"
 TICK_INTERVAL_SECONDS = 60.0
@@ -130,6 +130,8 @@ RPC_METHODS = (
     "schedule.history",
     "exceptions.get",
     "exceptions.set",
+    "exceptions.holidays",
+    "mower.start_mowing",
 )
 
 # On-disk schema version. Bumped from 1 to 2 when per-appointment overrides,
@@ -163,6 +165,9 @@ SKIP_CHARGING = "charging"
 SKIP_RAIN = "rain"
 SKIP_BLOCKED = "blocked"
 SKIP_HOLIDAY = "holiday"
+# A recurring block-window (time-of-day range, e.g. nightly 20:00-08:00) is
+# currently active. Distinct from SKIP_BLOCKED (a full-day manual block).
+SKIP_BLOCK_WINDOW = "block_window"
 
 # Mowing lifecycle event types that close out a dispatched run, mapped to the
 # (run_history status, reason) they record. Events are matched by the run_id in
@@ -646,6 +651,11 @@ class ScheduleStore:
             if not isinstance(angle, (int, float)):
                 raise RpcException(ERROR_INVALID_PARAMS, "overrides.angle_deg must be a number")
             out["angle_deg"] = float(angle)
+        outline_count = value.get("outline_count")
+        if outline_count is not None:
+            if not isinstance(outline_count, int) or isinstance(outline_count, bool) or outline_count < 0:
+                raise RpcException(ERROR_INVALID_PARAMS, "overrides.outline_count must be a non-negative integer")
+            out["outline_count"] = outline_count
         return out
 
 
@@ -754,22 +764,29 @@ class RunHistoryStore:
 
 
 class ExceptionsStore:
-    """Atomic JSON backing for mowing exceptions: manual blocking days plus the
-    country/region whose public holidays should also block mowing.
+    """Atomic JSON backing for mowing exceptions: manual blocking days, the
+    country/region whose public holidays should also block mowing, and
+    recurring block-windows (time-of-day ranges that block mowing).
 
     Shape (version 1):
         {"version": 1, "country": "DE", "subdiv": "BY",
-         "blocking_days": ["2026-06-15", ...]}
+         "blocking_days": ["2026-06-15", ...],
+         "timezone": "Europe/Vienna",
+         "block_windows": [{"start": "20:00", "end": "08:00", "days": ["MO", ...]}]}
 
     Holidays are computed with the `holidays` package (offline, no network) and
     cached per year. When the package is unavailable the country setting is kept
     but holiday checks are skipped; manual blocking days always apply.
+
+    Block-windows are evaluated in `timezone` (default UTC). A window with
+    end <= start crosses midnight (e.g. 20:00-08:00). An empty `days` list means
+    the window is active every day.
     """
 
     def __init__(self, path: str):
         self.path = path
         self._lock = threading.Lock()
-        self._data: dict = {"country": "", "subdiv": "", "blocking_days": []}
+        self._data: dict = {"country": "", "subdiv": "", "blocking_days": [], "timezone": "", "block_windows": []}
         # Per-(country, subdiv, year) cache of computed holiday sets.
         self._holiday_cache: dict = {}
         self._load()
@@ -787,6 +804,8 @@ class ExceptionsStore:
             "country": str(data.get("country") or ""),
             "subdiv": str(data.get("subdiv") or ""),
             "blocking_days": [str(d) for d in (data.get("blocking_days") or [])],
+            "timezone": str(data.get("timezone") or ""),
+            "block_windows": [w for w in (data.get("block_windows") or []) if isinstance(w, dict)],
         }
 
     def _save_unlocked(self) -> None:
@@ -832,11 +851,131 @@ class ExceptionsStore:
                 clean_days.append(datetime.date.fromisoformat(d[:10]).isoformat())
             except ValueError:
                 raise RpcException(ERROR_INVALID_PARAMS, f"invalid blocking day {d!r} (expected YYYY-MM-DD)")
+        # Timezone the block windows are interpreted in. Empty is allowed and
+        # falls back to UTC at evaluation time, mirroring schedule handling.
+        timezone = value.get("timezone", "")
+        if not isinstance(timezone, str):
+            raise RpcException(ERROR_INVALID_PARAMS, "timezone must be a string")
+        if timezone and _resolve_zone(timezone) is None:
+            raise RpcException(ERROR_INVALID_PARAMS, f"invalid timezone {timezone!r}")
+        block_windows = self._validate_block_windows(value.get("block_windows"))
         with self._lock:
-            self._data = {"country": country, "subdiv": subdiv, "blocking_days": sorted(set(clean_days))}
+            self._data = {
+                "country": country,
+                "subdiv": subdiv,
+                "blocking_days": sorted(set(clean_days)),
+                "timezone": timezone,
+                "block_windows": block_windows,
+            }
             self._holiday_cache.clear()
             self._save_unlocked()
             return dict(self._data)
+
+    @staticmethod
+    def _validate_block_windows(value: Any) -> list:
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            raise RpcException(ERROR_INVALID_PARAMS, "block_windows must be a list")
+        out: list = []
+        for w in value:
+            if not isinstance(w, dict):
+                raise RpcException(ERROR_INVALID_PARAMS, "block_windows entries must be objects")
+            start = w.get("start")
+            end = w.get("end")
+            if not isinstance(start, str) or not _parse_hhmm(start):
+                raise RpcException(ERROR_INVALID_PARAMS, "block_windows[].start must be 'HH:MM'")
+            if not isinstance(end, str) or not _parse_hhmm(end):
+                raise RpcException(ERROR_INVALID_PARAMS, "block_windows[].end must be 'HH:MM'")
+            clean = {"start": start, "end": end}
+            wdays = w.get("days")
+            if wdays is not None:
+                if not isinstance(wdays, list) or not all(d in WEEKDAY_CODES for d in wdays):
+                    raise RpcException(ERROR_INVALID_PARAMS, f"block_windows[].days entries must be in {WEEKDAY_CODES}")
+                # Empty list == every day; only store a non-empty subset.
+                if wdays:
+                    clean["days"] = list(wdays)
+            out.append(clean)
+        return out
+
+    def _zone(self) -> Any:
+        """Resolve the configured block-window timezone, defaulting to UTC."""
+        tz = _resolve_zone(self._data.get("timezone") or "UTC")
+        return tz if tz is not None else datetime.timezone.utc
+
+    def active_block_window(self, now_utc: datetime.datetime) -> bool:
+        """True when `now` falls inside any configured recurring block window,
+        evaluated in the exceptions timezone (handles midnight-crossing)."""
+        with self._lock:
+            windows = list(self._data.get("block_windows") or [])
+            tz = self._zone()
+        if not windows:
+            return False
+        now_local = now_utc.astimezone(tz)
+        now_minutes = now_local.hour * 60 + now_local.minute
+        today_code = WEEKDAY_CODES[now_local.weekday()]
+        yesterday_code = WEEKDAY_CODES[(now_local.weekday() - 1) % 7]
+        for w in windows:
+            start = _parse_hhmm(w.get("start", ""))
+            end = _parse_hhmm(w.get("end", ""))
+            if not start or not end:
+                continue
+            start_min = start[0] * 60 + start[1]
+            end_min = end[0] * 60 + end[1]
+            days = w.get("days")
+            if start_min < end_min:
+                # Same-day window [start, end). The active weekday is today.
+                if (not days or today_code in days) and start_min <= now_minutes < end_min:
+                    return True
+            else:
+                # Crosses midnight: active in [start, 24:00) on the window's day
+                # and [00:00, end) on the following day. The "day" the window is
+                # anchored to is the day it starts on.
+                if (not days or today_code in days) and now_minutes >= start_min:
+                    return True
+                if (not days or yesterday_code in days) and now_minutes < end_min:
+                    return True
+        return False
+
+    def names_for_range(self, from_date: datetime.date, to_date: datetime.date) -> list:
+        """Return [{date, name}] for every public holiday in [from, to].
+
+        Uses the configured country/region and the `holidays` package. Returns
+        an empty list when no country is set or the package is unavailable.
+        """
+        with self._lock:
+            country = self._data.get("country")
+            subdiv = self._data.get("subdiv")
+        if not country or _holidays is None:
+            return []
+        if to_date < from_date:
+            return []
+        out: list = []
+        cur = from_date
+        while cur <= to_date:
+            holiday_set = self._holiday_set(country, subdiv, cur.year)
+            name = holiday_set.get(cur) if holiday_set else None
+            if name:
+                out.append({"date": cur.isoformat(), "name": str(name)})
+            cur += datetime.timedelta(days=1)
+        return out
+
+    def _holiday_set(self, country: str, subdiv: str, year: int):
+        """Return (and memoize) the holidays mapping for a (country, subdiv,
+        year). Returns an empty dict when the lookup is unsupported."""
+        key = (country, subdiv, year)
+        with self._lock:
+            holiday_set = self._holiday_cache.get(key)
+            if holiday_set is not None:
+                return holiday_set
+        try:
+            holiday_set = _holidays.country_holidays(country, subdiv=subdiv or None, years=year)
+        except (NotImplementedError, KeyError) as e:
+            rospy.logwarn_throttle(3600, "Holiday lookup failed for %s/%s: %s", country, subdiv, e)
+            holiday_set = {}
+        with self._lock:
+            self._holiday_cache[key] = holiday_set
+        return holiday_set
 
     def reason_for(self, local_date: datetime.date) -> Optional[str]:
         """Return SKIP_BLOCKED for a manual blocking day, SKIP_HOLIDAY for a
@@ -847,21 +986,11 @@ class ExceptionsStore:
                 return SKIP_BLOCKED
             country = self._data.get("country")
             subdiv = self._data.get("subdiv")
-            if not country or _holidays is None:
-                return None
-            key = (country, subdiv, local_date.year)
-            holiday_set = self._holiday_cache.get(key)
-            if holiday_set is None:
-                try:
-                    holiday_set = _holidays.country_holidays(
-                        country, subdiv=subdiv or None, years=local_date.year
-                    )
-                except (NotImplementedError, KeyError) as e:
-                    rospy.logwarn_throttle(3600, "Holiday lookup failed for %s/%s: %s", country, subdiv, e)
-                    holiday_set = {}
-                self._holiday_cache[key] = holiday_set
-            if local_date in holiday_set:
-                return SKIP_HOLIDAY
+        if not country or _holidays is None:
+            return None
+        holiday_set = self._holiday_set(country, subdiv, local_date.year)
+        if holiday_set and local_date in holiday_set:
+            return SKIP_HOLIDAY
         return None
 
 
@@ -1018,7 +1147,60 @@ class SchedulerNode:
         if method == "exceptions.set":
             value = self._extract_param(params, "exceptions")
             return self.exceptions.set(value)
+        if method == "exceptions.holidays":
+            return self._handle_holidays(params)
+        if method == "mower.start_mowing":
+            return self._handle_start_mowing(params)
         raise RpcException(ERROR_INTERNAL, f"Unhandled method: {method}")
+
+    def _handle_holidays(self, params: Any) -> dict:
+        if not isinstance(params, dict):
+            raise RpcException(ERROR_INVALID_PARAMS, "expected by-name params {from, to}")
+        from_raw = params.get("from")
+        to_raw = params.get("to")
+        try:
+            from_date = datetime.date.fromisoformat(str(from_raw)[:10])
+            to_date = datetime.date.fromisoformat(str(to_raw)[:10])
+        except (ValueError, TypeError):
+            raise RpcException(ERROR_INVALID_PARAMS, "from/to must be ISO 'YYYY-MM-DD' dates")
+        return {"holidays": self.exceptions.names_for_range(from_date, to_date)}
+
+    def _handle_start_mowing(self, params: Any) -> dict:
+        if not isinstance(params, dict):
+            raise RpcException(ERROR_INVALID_PARAMS, "expected by-name params {areas, overrides?, duration_minutes?}")
+        areas = params.get("areas")
+        if not isinstance(areas, list) or not all(isinstance(a, int) and not isinstance(a, bool) for a in areas):
+            raise RpcException(ERROR_INVALID_PARAMS, "areas must be a list of integers")
+        overrides = ScheduleStore._validate_overrides(params.get("overrides"))
+        duration = params.get("duration_minutes", 0)
+        if duration is None:
+            duration = 0
+        if not isinstance(duration, (int, float)) or isinstance(duration, bool) or duration < 0:
+            raise RpcException(ERROR_INVALID_PARAMS, "duration_minutes must be a non-negative number")
+
+        now_utc = _utcnow()
+        with self._state_lock:
+            state = self._state
+        # Gate the same way scheduled runs are gated: the mower must be idle and
+        # safe, and no block window may be active.
+        global_reason = self._global_block_reason(state)
+        if global_reason:
+            raise RpcException(ERROR_INVALID_PARAMS, f"cannot start mowing — {global_reason}")
+        if self.exceptions.active_block_window(now_utc):
+            raise RpcException(ERROR_INVALID_PARAMS, "cannot start mowing — a block window is currently active")
+
+        stop_at = (now_utc + datetime.timedelta(minutes=int(duration))).timestamp() if duration else 0.0
+        run_id = self._dispatch_run(
+            schedule_id="manual",
+            name="Manual run",
+            areas=areas,
+            overrides=overrides,
+            occurrence_utc=now_utc,
+            now_utc=now_utc,
+            stop_at_epoch=stop_at,
+            mark_schedule_fired=False,
+        )
+        return {"run_id": run_id}
 
     @staticmethod
     def _extract_param(params: Any, name: str) -> Any:
@@ -1061,19 +1243,27 @@ class SchedulerNode:
         #    regardless of due candidates.
         self._enforce_stop_at_time(now_utc, state)
 
-        # 2. Continuous (24/7) schedules drive automatic_mode rather than firing
-        #    discrete runs; reconcile that ownership each tick.
-        self._reconcile_continuous_mode(now_utc, state)
+        # 2. Enforce block windows (hard stop): if a recurring block window is
+        #    active and the robot is mowing, send it home. Runs every tick.
+        block_window_active = self.exceptions.active_block_window(now_utc)
+        self._enforce_block_windows(block_window_active, state)
 
-        # 3. Collect discrete due runs: time_area (rrule occurrences) and
+        # 3. Continuous (24/7) schedules drive automatic_mode rather than firing
+        #    discrete runs; reconcile that ownership each tick.
+        self._reconcile_continuous_mode(now_utc, state, block_window_active)
+
+        # 4. Collect discrete due runs: time_area (rrule occurrences) and
         #    time_window (window-start crossings). Both share the firing path.
         candidates = self.store.evaluate_due(now_utc) + self.store.evaluate_windows(now_utc)
         if not candidates:
             return
 
         # Determine the global block reason once — it applies uniformly to
-        # every due candidate, so we annotate them all with the same skip.
+        # every due candidate, so we annotate them all with the same skip. An
+        # active block window gates every candidate the same way.
         global_reason = self._global_block_reason(state)
+        if global_reason is None and block_window_active:
+            global_reason = SKIP_BLOCK_WINDOW
         if global_reason:
             rospy.loginfo("Skipping %d due schedule(s) — %s", len(candidates), global_reason)
             for cand in candidates:
@@ -1096,6 +1286,21 @@ class SchedulerNode:
                 self._emit_skip(schedule, SKIP_RAIN)
                 continue
             self._fire(schedule, cand.occurrence_utc, now_utc, stop_at_epoch=cand.stop_at_epoch)
+
+    def _enforce_block_windows(self, block_window_active: bool, state: Optional[RobotState]) -> None:
+        """When a recurring block window is active and the robot is mowing, send
+        it home (hard stop). Mirrors _enforce_stop_at_time but applies to any
+        active mow — scheduled or manual — because a block window is a global
+        "do not mow now" rule. Idempotent: ABORT to dock is harmless to repeat,
+        but we only publish while the robot is still mowing."""
+        if not block_window_active:
+            return
+        if state is None or state.current_state in ("IDLE", "DOCKING"):
+            return
+        rospy.loginfo_throttle(60, "Block window active while mowing — sending home")
+        msg = String()
+        msg.data = ABORT_ACTION_ID
+        self._action_pub.publish(msg)
 
     def _enforce_stop_at_time(self, now_utc: datetime.datetime, state: Optional[RobotState]) -> None:
         with self._run_lock:
@@ -1122,15 +1327,18 @@ class SchedulerNode:
             if self._active_run and self._active_run.get("run_id") == run["run_id"]:
                 self._active_run["stop_at_epoch"] = 0.0
 
-    def _reconcile_continuous_mode(self, now_utc: datetime.datetime, state: Optional[RobotState]) -> None:
+    def _reconcile_continuous_mode(
+        self, now_utc: datetime.datetime, state: Optional[RobotState], block_window_active: bool
+    ) -> None:
         """Drive automatic_mode for continuous (24/7) schedules.
 
         A single enabled continuous schedule, when not gated by a blocking day,
-        holiday, rain or an off-day, holds automatic_mode at AUTO so IdleBehavior
-        keeps re-starting mowing on its own. When gated, or when no continuous
-        schedule exists, the scheduler hands automatic_mode back (to SEMIAUTO
-        when gated so an in-progress task can still finish-and-dock without
-        auto-restarting, or releases ownership entirely otherwise).
+        holiday, rain, an active block window or an off-day, holds automatic_mode
+        at AUTO so IdleBehavior keeps re-starting mowing on its own. When gated,
+        or when no continuous schedule exists, the scheduler hands automatic_mode
+        back (to SEMIAUTO when gated so an in-progress task can still
+        finish-and-dock without auto-restarting, or releases ownership entirely
+        otherwise).
         """
         continuous = [
             s for s in self.store.snapshot()
@@ -1143,6 +1351,15 @@ class SchedulerNode:
                 rospy.loginfo("No continuous schedule remains; releasing automatic_mode ownership")
                 self._continuous_owned = False
                 self._continuous_last_mode = None
+            return
+
+        # An active block window gates every continuous schedule globally — no
+        # auto-restart until it ends, regardless of per-schedule settings.
+        if block_window_active:
+            self._continuous_owned = True
+            if self._continuous_last_mode != AUTO_MODE_SEMIAUTO and self._set_automatic_mode(AUTO_MODE_SEMIAUTO):
+                self._continuous_last_mode = AUTO_MODE_SEMIAUTO
+                rospy.loginfo("Continuous mode set automatic_mode=%d (block window active)", AUTO_MODE_SEMIAUTO)
             return
 
         # A continuous schedule wants to mow unless it is individually gated by
@@ -1215,48 +1432,76 @@ class SchedulerNode:
         now_utc: datetime.datetime,
         stop_at_epoch: float = 0.0,
     ) -> None:
-        areas = [int(a) for a in (schedule.get("areas") or [])]
-        # Hand the full run spec to MowingBehavior via the next_run param block.
-        # An empty area list means "mow every active area" (24/7 / whole-map).
-        # The `pending` flag is the unambiguous "fresh scheduled run" signal:
-        # MowingBehavior latches the whole block and clears pending on entry, so
-        # a resume after a charge cycle keeps the in-progress run. The legacy
-        # single next_area_index stays untouched for map.start_in_area.
-        overrides = schedule.get("overrides") or {}
+        """Dispatch a due schedule occurrence and record the firing against the
+        schedule (for rrule dedup)."""
+        self._dispatch_run(
+            schedule_id=schedule["id"],
+            name=schedule["name"],
+            areas=schedule.get("areas"),
+            overrides=schedule.get("overrides"),
+            occurrence_utc=occurrence_utc,
+            now_utc=now_utc,
+            stop_at_epoch=stop_at_epoch,
+            mark_schedule_fired=True,
+        )
+
+    def _dispatch_run(
+        self,
+        *,
+        schedule_id: str,
+        name: str,
+        areas: Optional[list],
+        overrides: Optional[dict],
+        occurrence_utc: datetime.datetime,
+        now_utc: datetime.datetime,
+        stop_at_epoch: float,
+        mark_schedule_fired: bool,
+    ) -> str:
+        """Hand a full run spec to MowingBehavior via the next_run param block
+        and open a run-history entry. Shared by scheduled firings (_fire) and
+        manual starts (mower.start_mowing). Returns the run_id.
+
+        An empty area list means "mow every active area" (24/7 / whole-map).
+        The `pending` flag is the unambiguous "fresh run" signal: MowingBehavior
+        latches the whole block and clears pending on entry, so a resume after a
+        charge cycle keeps the in-progress run. The legacy single next_area_index
+        stays untouched for map.start_in_area.
+        """
+        areas = [int(a) for a in (areas or [])]
+        overrides = overrides or {}
         fill = _pattern_to_fill(overrides.get("pattern"))
         speed = overrides.get("speed_mps")
         angle = overrides.get("angle_deg")
+        outline_count = overrides.get("outline_count")
         # Correlation id for this run, echoed by MowingBehavior into its
         # lifecycle events so _on_event can tie a completion/abort back to this
-        # occurrence and update the run-history entry we open below.
+        # run and update the run-history entry we open below.
         run_id = secrets.token_hex(8)
         rospy.set_param(NEXT_RUN_PARAM + "/area_indices", areas)
         rospy.set_param(NEXT_RUN_PARAM + "/pattern", int(fill) if fill is not None else -1)
         rospy.set_param(NEXT_RUN_PARAM + "/speed_mps", float(speed) if speed is not None else float("nan"))
         rospy.set_param(NEXT_RUN_PARAM + "/angle_deg", float(angle) if angle is not None else float("nan"))
+        rospy.set_param(NEXT_RUN_PARAM + "/outline_count", int(outline_count) if outline_count is not None else -1)
         rospy.set_param(NEXT_RUN_PARAM + "/stop_at_epoch", float(stop_at_epoch))
         rospy.set_param(NEXT_RUN_PARAM + "/run_id", run_id)
         rospy.set_param(NEXT_RUN_PARAM + "/pending", True)
         if areas:
-            rospy.loginfo(
-                "Firing schedule %s (%s) over area(s) %s", schedule["id"], schedule["name"], areas,
-            )
+            rospy.loginfo("Firing run %s (%s) over area(s) %s", schedule_id, name, areas)
         else:
-            rospy.loginfo("Firing schedule %s (%s) over all active areas", schedule["id"], schedule["name"])
+            rospy.loginfo("Firing run %s (%s) over all active areas", schedule_id, name)
         # Persist before publishing so a crash between the two does not lead
         # to the action firing again on the next tick: the dedup check in
         # evaluate_due() relies on _last_fired_iso being on disk.
-        self.store.record_fire(schedule["id"], occurrence_utc, run_id)
-        self.history.open_run(
-            run_id, schedule["id"], schedule["name"], occurrence_utc, areas, now_utc,
-        )
+        if mark_schedule_fired:
+            self.store.record_fire(schedule_id, occurrence_utc, run_id)
+        self.history.open_run(run_id, schedule_id, name, occurrence_utc, areas, now_utc)
         # Track the run for stop-at-time enforcement. stop_at_epoch == 0 means
         # "no time limit" (e.g. a time_area schedule with mowing left to run to
         # natural completion is still bounded by duration_minutes; 0 disables).
         with self._run_lock:
             self._active_run = {
                 "run_id": run_id,
-                "schedule_id": schedule["id"],
+                "schedule_id": schedule_id,
                 "stop_at_epoch": float(stop_at_epoch),
             }
         msg = String()
@@ -1264,9 +1509,10 @@ class SchedulerNode:
         self._action_pub.publish(msg)
         event_publisher.info(
             "schedule.run_started",
-            f"Schedule '{schedule['name']}' fired",
-            {"schedule_id": schedule["id"], "name": schedule["name"], "area_indices": areas, "run_id": run_id},
+            f"Run '{name}' fired",
+            {"schedule_id": schedule_id, "name": name, "area_indices": areas, "run_id": run_id},
         )
+        return run_id
 
     @staticmethod
     def _emit_skip(schedule: dict, reason: str) -> None:

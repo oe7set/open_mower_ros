@@ -149,6 +149,8 @@ void MowingBehavior::consume_next_run() {
     ros::param::getCached("/mower_logic/next_run/speed_mps", requestedSpeed);
     requestedAngleDeg = std::numeric_limits<double>::quiet_NaN();
     ros::param::getCached("/mower_logic/next_run/angle_deg", requestedAngleDeg);
+    requestedOutlineCount = -1;
+    ros::param::getCached("/mower_logic/next_run/outline_count", requestedOutlineCount);
     requestedRunId.clear();
     ros::param::getCached("/mower_logic/next_run/run_id", requestedRunId);
 
@@ -161,7 +163,8 @@ void MowingBehavior::consume_next_run() {
     ROS_INFO_STREAM(
         "MowingBehavior: starting scheduled run over "
         << (requestedAreaQueue.empty() ? std::string("all active") : std::to_string(requestedAreaQueue.size()))
-        << " area(s), fill=" << requestedFillType << " speed=" << requestedSpeed << " angle_deg=" << requestedAngleDeg);
+        << " area(s), fill=" << requestedFillType << " speed=" << requestedSpeed << " angle_deg=" << requestedAngleDeg
+        << " outline=" << requestedOutlineCount);
     ros::param::set("/mower_logic/next_run/pending", false);
     return;
   }
@@ -177,6 +180,7 @@ void MowingBehavior::consume_next_run() {
     requestedFillType = -1;
     requestedSpeed = std::numeric_limits<double>::quiet_NaN();
     requestedAngleDeg = std::numeric_limits<double>::quiet_NaN();
+    requestedOutlineCount = -1;
     requestedRunId.clear();
     currentMowingArea = requested_area;
     currentMowingPaths.clear();
@@ -307,6 +311,7 @@ void MowingBehavior::reset() {
   requestedFillType = -1;
   requestedSpeed = std::numeric_limits<double>::quiet_NaN();
   requestedAngleDeg = std::numeric_limits<double>::quiet_NaN();
+  requestedOutlineCount = -1;
   // increase cumulative mowing angle offset increment
   currentMowingAngleIncrementSum = std::fmod(currentMowingAngleIncrementSum + getConfig().mow_angle_increment, 360);
   checkpoint();
@@ -412,7 +417,10 @@ bool MowingBehavior::create_mowing_plan(int area_index) {
 
   slic3r_coverage_planner::PlanPath pathSrv;
   pathSrv.request.angle = angle;
-  pathSrv.request.outline_count = overrideOrGlobal(area.outline_count, config.outline_count, -1);
+  // A per-run outline override from the scheduler (>= 0) wins over the per-area
+  // value and the global config, mirroring how requestedFillType/Angle behave.
+  const int outline_count = overrideOrGlobal(area.outline_count, config.outline_count, -1);
+  pathSrv.request.outline_count = (requestedOutlineCount >= 0) ? requestedOutlineCount : outline_count;
   pathSrv.request.outline_overlap_count =
       overrideOrGlobal(area.outline_overlap_count, config.outline_overlap_count, -1);
   pathSrv.request.outline = area.area;
@@ -850,6 +858,7 @@ MowingBehavior::MowingBehavior() {
   requestedFillType = -1;
   requestedSpeed = std::numeric_limits<double>::quiet_NaN();
   requestedAngleDeg = std::numeric_limits<double>::quiet_NaN();
+  requestedOutlineCount = -1;
   speedOverridden = false;
   savedSpeedSlow = 0.15;
   savedSpeedFast = 0.4;
