@@ -10,3 +10,7 @@
 [submodule "services"]
 	path = services
 	url = https://github.com/xtech/definitions-open-mower.git
+[submodule "src/lib/slic3r_coverage_planner"]
+	path = src/lib/slic3r_coverage_planner
+	url = https://github.com/oe7set/slic3r_coverage_planner.git
+	branch = feature/app-enhancements
