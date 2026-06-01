@@ -482,10 +482,22 @@ bool planPath(slic3r_coverage_planner::PlanPathRequest &req, slic3r_coverage_pla
             Slic3r::Surface surface(Slic3r::SurfaceType::stBottom, poly);
 
             Slic3r::Fill *fill;
-            if (req.fill_type == slic3r_coverage_planner::PlanPathRequest::FILL_LINEAR) {
-                fill = new Slic3r::FillRectilinear();
-            } else {
-                fill = new Slic3r::FillConcentric();
+            switch (req.fill_type) {
+                case slic3r_coverage_planner::PlanPathRequest::FILL_CONCENTRIC:
+                    fill = new Slic3r::FillConcentric();
+                    break;
+                case slic3r_coverage_planner::PlanPathRequest::FILL_CONCENTRIC_CIRCLE:
+                    // Archimedean spiral — the closest slic3r fill to "concentric
+                    // circles" since FillConcentric follows the polygon outline.
+                    fill = new Slic3r::FillArchimedeanChords();
+                    break;
+                case slic3r_coverage_planner::PlanPathRequest::FILL_HILBERT:
+                    fill = new Slic3r::FillHilbertCurve();
+                    break;
+                case slic3r_coverage_planner::PlanPathRequest::FILL_LINEAR:
+                default:
+                    fill = new Slic3r::FillRectilinear();
+                    break;
             }
             fill->link_max_length = scale_(1.0);
             fill->angle = req.angle;

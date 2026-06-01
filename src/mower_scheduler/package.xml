@@ -22,6 +22,13 @@
   <exec_depend>xbot_msgs</exec_depend>
   <exec_depend>xbot_rpc</exec_depend>
   <exec_depend>python3-dateutil</exec_depend>
+  <exec_depend>dynamic_reconfigure</exec_depend>
+  <!-- NOTE: the `holidays` Python package (optional, for public-holiday
+       blocking) is intentionally NOT declared here: it has no rosdep key on
+       Focal, and declaring it makes `rosdep install` fail for the whole
+       workspace. It is pip-installed in docker/Dockerfile instead, and the
+       node degrades gracefully when it is absent (manual blocking days still
+       work). -->
 
   <export/>
 </package>

@@ -73,6 +73,16 @@ RUN apt-get update && \
     apt-get install --no-install-recommends --yes $(cat /apt-install_list) libasio-dev && \
     rm -rf /var/lib/apt/lists/*
 
+# mower_scheduler uses the `holidays` package for country-specific public-holiday
+# blocking. There is no rosdep key on Focal, and the Noetic base image ships no
+# pip, so install pip via apt then pip-install holidays. Pin <0.59: that is the
+# last release supporting Python 3.8 (Focal's interpreter); 0.59+ require 3.9+.
+# The node degrades gracefully if this is ever missing (manual blocking days
+# still work).
+RUN apt-get update && apt-get install --no-install-recommends --yes python3-pip && \
+    rm -rf /var/lib/apt/lists/* && \
+    python3 -m pip install --no-cache-dir "holidays<0.59"
+
 COPY --link ./ /opt/open_mower_ros
 
 #delete prebuilt libs (so that they won't shadow the preinstalled ones)

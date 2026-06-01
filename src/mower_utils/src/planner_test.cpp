@@ -27,6 +27,9 @@ int main(int argc, char** argv) {
 
   int area_index = paramNh.param("area_index", 0);
   int outline_count = paramNh.param("outline_count", 4);
+  // Fill pattern to exercise: 0 - Linear, 1 - Concentric, 2 - Concentric circle
+  // (Archimedean spiral), 3 - Hilbert curve. Override via _fill_type:=N.
+  int fill_type = paramNh.param("fill_type", 0);
 
   ros::Publisher path_pub;
 
@@ -54,7 +57,7 @@ int main(int argc, char** argv) {
   pathSrv.request.outline_count = outline_count;
   pathSrv.request.outline = mapSrv.response.area.area;
   pathSrv.request.holes = mapSrv.response.area.obstacles;
-  pathSrv.request.fill_type = slic3r_coverage_planner::PlanPathRequest::FILL_LINEAR;
+  pathSrv.request.fill_type = static_cast<uint8_t>(fill_type);
   pathSrv.request.distance = 0.13;
   pathSrv.request.outer_offset = 0.05;
 

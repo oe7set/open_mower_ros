@@ -17,12 +17,15 @@
 #include <cryptopp/cryptlib.h>
 #include <cryptopp/hex.h>
 #include <cryptopp/sha.h>
+#include <dynamic_reconfigure/DoubleParameter.h>
+#include <dynamic_reconfigure/Reconfigure.h>
 #include <nav_msgs/Path.h>
 #include <rosbag/bag.h>
 #include <rosbag/view.h>
 
 #include <cmath>
 #include <event_publisher/event_publisher.hpp>
+#include <limits>
 
 #include "DockingBehavior.h"
 #include "IdleBehavior.h"
@@ -67,7 +70,11 @@ Behavior* MowingBehavior::execute() {
 
     // No plan will be created if the area is skipped
     if (currentMowingPaths.empty()) {
-      currentMowingArea++;
+      if (!advance_to_next_area()) {
+        // Explicit area queue exhausted (all listed areas were inactive).
+        reset();
+        return &DockingBehavior::INSTANCE;
+      }
       currentMowingPath = 0;
       currentMowingPathIndex = 0;
       continue;
@@ -79,8 +86,12 @@ Behavior* MowingBehavior::execute() {
     if (finished) {
       // skip to next area if current
       ROS_INFO_STREAM("MowingBehavior: Executing mowing plan - finished");
-      currentMowingArea++;
       currentMowingPaths.clear();
+      if (!advance_to_next_area()) {
+        // Explicit area queue fully mowed — we're done, dock.
+        reset();
+        return &DockingBehavior::INSTANCE;
+      }
       currentMowingPath = 0;
       currentMowingPathIndex = 0;
     }
@@ -99,45 +110,188 @@ Behavior* MowingBehavior::execute() {
   return &DockingBehavior::INSTANCE;
 }
 
-void MowingBehavior::enter() {
-  skip_area = false;
-  skip_path = false;
-  abort_to_idle = false;
-  paused = aborted = false;
+bool MowingBehavior::advance_to_next_area() {
+  if (requestedAreaQueue.empty()) {
+    // Legacy / 24-7 whole-map iteration: walk every map area in order.
+    // Termination happens implicitly when create_mowing_plan() fails on an
+    // out-of-range index, so we always report "more to do" here.
+    currentMowingArea++;
+    return true;
+  }
+  // Explicit scheduler-dispatched queue: hand out the next listed area.
+  requestedAreaQueuePos++;
+  if (requestedAreaQueuePos >= requestedAreaQueue.size()) {
+    return false;
+  }
+  currentMowingArea = requestedAreaQueue[requestedAreaQueuePos];
+  ROS_INFO_STREAM("MowingBehavior: advancing to queued area " << currentMowingArea << " ("
+                                                              << (requestedAreaQueuePos + 1) << "/"
+                                                              << requestedAreaQueue.size() << ")");
+  return true;
+}
 
-  // map.start_in_area RPC stashes the requested mowing-area index here. Pick
-  // it up exactly once on entry so a "Start in this area" click jumps to the
-  // right area; subsequent transitions (resume after pause, etc.) keep the
-  // existing currentMowingArea progression.
+void MowingBehavior::consume_next_run() {
+  // A fresh scheduled run is signalled by next_run/pending=true. We latch the
+  // whole param block into members and clear the flag so a resume after a
+  // charge dock/undock cycle (this behavior is a persistent singleton) keeps
+  // the in-progress run rather than re-dispatching it. map.start_in_area uses
+  // the separate legacy /mower_logic/next_area_index and never sets pending.
+  bool pending = false;
+  if (ros::param::getCached("/mower_logic/next_run/pending", pending) && pending) {
+    std::vector<int> areas;
+    ros::param::getCached("/mower_logic/next_run/area_indices", areas);
+    requestedAreaQueue = areas;
+    requestedAreaQueuePos = 0;
+
+    requestedFillType = -1;
+    ros::param::getCached("/mower_logic/next_run/pattern", requestedFillType);
+    requestedSpeed = std::numeric_limits<double>::quiet_NaN();
+    ros::param::getCached("/mower_logic/next_run/speed_mps", requestedSpeed);
+    requestedAngleDeg = std::numeric_limits<double>::quiet_NaN();
+    ros::param::getCached("/mower_logic/next_run/angle_deg", requestedAngleDeg);
+    requestedRunId.clear();
+    ros::param::getCached("/mower_logic/next_run/run_id", requestedRunId);
+
+    if (!requestedAreaQueue.empty()) {
+      currentMowingArea = requestedAreaQueue.front();
+    }
+    currentMowingPaths.clear();
+    currentMowingPath = 0;
+    currentMowingPathIndex = 0;
+    ROS_INFO_STREAM("MowingBehavior: starting scheduled run over "
+                    << (requestedAreaQueue.empty() ? std::string("all active") : std::to_string(requestedAreaQueue.size()))
+                    << " area(s), fill=" << requestedFillType << " speed=" << requestedSpeed
+                    << " angle_deg=" << requestedAngleDeg);
+    ros::param::set("/mower_logic/next_run/pending", false);
+    return;
+  }
+
+  // No scheduled run pending. Honor the legacy single-area start from
+  // map.start_in_area, and treat any non-scheduled entry as a manual run by
+  // dropping per-run overrides so they cannot leak across runs.
   int requested_area = -1;
   if (ros::param::getCached("/mower_logic/next_area_index", requested_area) && requested_area >= 0) {
     ROS_INFO_STREAM("MowingBehavior: starting in area " << requested_area << " (from map.start_in_area)");
+    requestedAreaQueue.clear();
+    requestedAreaQueuePos = 0;
+    requestedFillType = -1;
+    requestedSpeed = std::numeric_limits<double>::quiet_NaN();
+    requestedAngleDeg = std::numeric_limits<double>::quiet_NaN();
+    requestedRunId.clear();
     currentMowingArea = requested_area;
     currentMowingPaths.clear();
     currentMowingPath = 0;
     currentMowingPathIndex = 0;
     ros::param::set("/mower_logic/next_area_index", -1);
   }
+}
+
+// Namespace of the FTC local planner's dynamic_reconfigure server. The planner
+// runs as a controller plugin inside move_base_flex (see
+// open_mower/params/move_base_flex.yaml + ftc_local_planner.yaml), so its
+// params live under /move_base_flex/FTCPlanner.
+static const char* FTC_NS = "/move_base_flex/FTCPlanner";
+
+void MowingBehavior::apply_speed_override() {
+  speedOverridden = false;
+  if (std::isnan(requestedSpeed) || requestedSpeed <= 0.0) {
+    return;
+  }
+
+  // Capture the current speeds so exit() can restore them. dynamic_reconfigure
+  // mirrors its values onto the param server, so a plain param read is enough.
+  savedSpeedSlow = 0.15;
+  savedSpeedFast = 0.4;
+  ros::param::get(std::string(FTC_NS) + "/speed_slow", savedSpeedSlow);
+  ros::param::get(std::string(FTC_NS) + "/speed_fast", savedSpeedFast);
+
+  // speed_slow is the actual mowing speed; speed_fast is the approach/traversal
+  // speed. Override the mowing speed, and never let it exceed the traversal
+  // speed (the planner assumes slow <= fast).
+  dynamic_reconfigure::Reconfigure srv;
+  dynamic_reconfigure::DoubleParameter p_slow;
+  p_slow.name = "speed_slow";
+  p_slow.value = requestedSpeed;
+  srv.request.config.doubles.push_back(p_slow);
+  if (requestedSpeed > savedSpeedFast) {
+    dynamic_reconfigure::DoubleParameter p_fast;
+    p_fast.name = "speed_fast";
+    p_fast.value = requestedSpeed;
+    srv.request.config.doubles.push_back(p_fast);
+  }
+
+  if (ros::service::call(std::string(FTC_NS) + "/set_parameters", srv)) {
+    speedOverridden = true;
+    ROS_INFO_STREAM("MowingBehavior: overrode FTC mowing speed to " << requestedSpeed
+                                                                    << " m/s (was " << savedSpeedSlow << ")");
+  } else {
+    ROS_WARN_STREAM("MowingBehavior: failed to set FTC speed override; keeping global speed");
+  }
+}
+
+void MowingBehavior::restore_speed_override() {
+  if (!speedOverridden) {
+    return;
+  }
+  dynamic_reconfigure::Reconfigure srv;
+  dynamic_reconfigure::DoubleParameter p_slow;
+  p_slow.name = "speed_slow";
+  p_slow.value = savedSpeedSlow;
+  srv.request.config.doubles.push_back(p_slow);
+  dynamic_reconfigure::DoubleParameter p_fast;
+  p_fast.name = "speed_fast";
+  p_fast.value = savedSpeedFast;
+  srv.request.config.doubles.push_back(p_fast);
+  if (ros::service::call(std::string(FTC_NS) + "/set_parameters", srv)) {
+    ROS_INFO_STREAM("MowingBehavior: restored FTC speeds (slow=" << savedSpeedSlow << ", fast=" << savedSpeedFast
+                                                                 << ")");
+  } else {
+    ROS_WARN_STREAM("MowingBehavior: failed to restore FTC speeds");
+  }
+  speedOverridden = false;
+}
+
+void MowingBehavior::enter() {
+  skip_area = false;
+  skip_path = false;
+  abort_to_idle = false;
+  paused = aborted = false;
+
+  consume_next_run();
+  apply_speed_override();
 
   for (auto& a : actions) {
     a.enabled = true;
   }
   registerActions("mower_logic:mowing", actions);
 
-  open_mower::events::EventPublisher::info("mowing.started", "Mowing started", {{"area_index", currentMowingArea}});
+  open_mower::events::EventPublisher::info("mowing.started", "Mowing started",
+                                           {{"area_index", currentMowingArea}, {"run_id", requestedRunId}});
 }
 
 void MowingBehavior::exit() {
+  // Restore the FTC planner speed before anything else so a per-run speed
+  // override never bleeds into docking or a subsequent run; this runs on every
+  // exit path (completion, abort, pause-to-dock).
+  restore_speed_override();
+
   for (auto& a : actions) {
     a.enabled = false;
   }
   registerActions("mower_logic:mowing", actions);
 
-  // Surface only the natural-completion case here; aborted/paused exits emit
-  // their own events from the pause/abort code paths.
-  if (!aborted && !paused) {
+  if (aborted) {
+    // An aborted run previously emitted nothing here, leaving the scheduler
+    // unable to tell a stuck/cancelled run from a completed one. Emit an
+    // explicit aborted event carrying the run_id so failure correlation works.
+    // abort_to_idle is a deliberate user stop; a plain abort is the failure /
+    // stop-at-time / dock path.
+    open_mower::events::EventPublisher::warning(
+        "mowing.aborted", "Mowing aborted",
+        {{"area_index", currentMowingArea}, {"run_id", requestedRunId}, {"to_idle", abort_to_idle}});
+  } else if (!paused) {
     open_mower::events::EventPublisher::info("mowing.session_completed", "Mowing session finished",
-                                             {{"area_index", currentMowingArea}});
+                                             {{"area_index", currentMowingArea}, {"run_id", requestedRunId}});
   }
 }
 
@@ -146,6 +300,13 @@ void MowingBehavior::reset() {
   currentMowingArea = 0;
   currentMowingPath = 0;
   currentMowingPathIndex = 0;
+  // A completed (or unplannable) run ends the scheduler-dispatched queue and
+  // its per-run overrides; the next dispatch repopulates them in enter().
+  requestedAreaQueue.clear();
+  requestedAreaQueuePos = 0;
+  requestedFillType = -1;
+  requestedSpeed = std::numeric_limits<double>::quiet_NaN();
+  requestedAngleDeg = std::numeric_limits<double>::quiet_NaN();
   // increase cumulative mowing angle offset increment
   currentMowingAngleIncrementSum = std::fmod(currentMowingAngleIncrementSum + getConfig().mow_angle_increment, 360);
   checkpoint();
@@ -229,11 +390,25 @@ bool MowingBehavior::create_mowing_plan(int area_index) {
     ROS_INFO_STREAM("MowingBehavior: Auto-detected mowing angle + mowing angle offset: " << angle);
   }
 
+  // A per-run angle override from the scheduler is absolute and supersedes the
+  // auto-detected/global angle entirely (equivalent to a one-off
+  // mow_angle_offset_is_absolute for this run), without mutating global config.
+  if (!std::isnan(requestedAngleDeg)) {
+    angle = requestedAngleDeg * (M_PI / 180.0);
+    ROS_INFO_STREAM("MowingBehavior: Using per-run absolute mowing angle (deg): " << requestedAngleDeg);
+  }
+
   // calculate coverage
   const auto& area = mapSrv.response.area;
   auto overrideOrGlobal = [](auto override, auto global, auto sentinel) {
     return (override != sentinel) ? override : global;
   };
+
+  // Fill pattern: a per-run override latched from the scheduler
+  // (requestedFillType, -1 = none) wins over the global default_mow_pattern.
+  // Values map directly onto the PlanPath fill enum.
+  int fill_type = (requestedFillType >= 0) ? requestedFillType : getConfig().default_mow_pattern;
+  ROS_INFO_STREAM("MowingBehavior: using fill pattern " << fill_type);
 
   slic3r_coverage_planner::PlanPath pathSrv;
   pathSrv.request.angle = angle;
@@ -242,7 +417,7 @@ bool MowingBehavior::create_mowing_plan(int area_index) {
       overrideOrGlobal(area.outline_overlap_count, config.outline_overlap_count, -1);
   pathSrv.request.outline = area.area;
   pathSrv.request.holes = area.obstacles;
-  pathSrv.request.fill_type = slic3r_coverage_planner::PlanPathRequest::FILL_LINEAR;
+  pathSrv.request.fill_type = static_cast<uint8_t>(fill_type);
   pathSrv.request.outer_offset = std::isnan(area.outline_offset) ? config.outline_offset : area.outline_offset;
   pathSrv.request.distance = config.tool_width;
   if (!pathClient.call(pathSrv)) {
@@ -668,6 +843,16 @@ int16_t MowingBehavior::get_current_path_index() {
 
 MowingBehavior::MowingBehavior() {
   last_checkpoint = ros::Time(0.0);
+  // No explicit area queue until the scheduler dispatches one. After a crash,
+  // restore_checkpoint() rehydrates the area/path progress but not the queue,
+  // so recovery falls back to whole-map iteration by design.
+  requestedAreaQueuePos = 0;
+  requestedFillType = -1;
+  requestedSpeed = std::numeric_limits<double>::quiet_NaN();
+  requestedAngleDeg = std::numeric_limits<double>::quiet_NaN();
+  speedOverridden = false;
+  savedSpeedSlow = 0.15;
+  savedSpeedFast = 0.4;
   xbot_msgs::ActionInfo pause_action;
   pause_action.action_id = "pause";
   pause_action.enabled = false;
