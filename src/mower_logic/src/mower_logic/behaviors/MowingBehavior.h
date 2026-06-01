@@ -46,9 +46,9 @@ class MowingBehavior : public Behavior {
   // active areas" behavior (24/7 mode and manual whole-map starts).
   std::vector<int> requestedAreaQueue;
   size_t requestedAreaQueuePos;
-  int requestedFillType;      // slic3r fill enum; -1 = use default_mow_pattern
-  double requestedSpeed;      // m/s; NaN = use the global FTC planner speed
-  double requestedAngleDeg;   // absolute degrees; NaN = use global/auto angle
+  int requestedFillType;     // slic3r fill enum; -1 = use default_mow_pattern
+  double requestedSpeed;     // m/s; NaN = use the global FTC planner speed
+  double requestedAngleDeg;  // absolute degrees; NaN = use global/auto angle
   // Correlation id for the scheduler-dispatched run, echoed into mowing
   // lifecycle events so the scheduler can tie failures back to the occurrence
   // that triggered them. Empty for manual runs.

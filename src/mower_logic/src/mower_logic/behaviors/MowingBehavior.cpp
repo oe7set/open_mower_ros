@@ -124,9 +124,9 @@ bool MowingBehavior::advance_to_next_area() {
     return false;
   }
   currentMowingArea = requestedAreaQueue[requestedAreaQueuePos];
-  ROS_INFO_STREAM("MowingBehavior: advancing to queued area " << currentMowingArea << " ("
-                                                              << (requestedAreaQueuePos + 1) << "/"
-                                                              << requestedAreaQueue.size() << ")");
+  ROS_INFO_STREAM("MowingBehavior: advancing to queued area "
+                  << currentMowingArea << " (" << (requestedAreaQueuePos + 1) << "/" << requestedAreaQueue.size()
+                  << ")");
   return true;
 }
 
@@ -158,10 +158,10 @@ void MowingBehavior::consume_next_run() {
     currentMowingPaths.clear();
     currentMowingPath = 0;
     currentMowingPathIndex = 0;
-    ROS_INFO_STREAM("MowingBehavior: starting scheduled run over "
-                    << (requestedAreaQueue.empty() ? std::string("all active") : std::to_string(requestedAreaQueue.size()))
-                    << " area(s), fill=" << requestedFillType << " speed=" << requestedSpeed
-                    << " angle_deg=" << requestedAngleDeg);
+    ROS_INFO_STREAM(
+        "MowingBehavior: starting scheduled run over "
+        << (requestedAreaQueue.empty() ? std::string("all active") : std::to_string(requestedAreaQueue.size()))
+        << " area(s), fill=" << requestedFillType << " speed=" << requestedSpeed << " angle_deg=" << requestedAngleDeg);
     ros::param::set("/mower_logic/next_run/pending", false);
     return;
   }
@@ -222,8 +222,8 @@ void MowingBehavior::apply_speed_override() {
 
   if (ros::service::call(std::string(FTC_NS) + "/set_parameters", srv)) {
     speedOverridden = true;
-    ROS_INFO_STREAM("MowingBehavior: overrode FTC mowing speed to " << requestedSpeed
-                                                                    << " m/s (was " << savedSpeedSlow << ")");
+    ROS_INFO_STREAM("MowingBehavior: overrode FTC mowing speed to " << requestedSpeed << " m/s (was " << savedSpeedSlow
+                                                                    << ")");
   } else {
     ROS_WARN_STREAM("MowingBehavior: failed to set FTC speed override; keeping global speed");
   }
