@@ -19,3 +19,6 @@ float32 gps_quality_percent
 float32 battery_percent
 bool is_charging
 bool emergency
+# Fraction (0..1) of the current action completed. Only meaningful while mowing;
+# 0 otherwise.
+float32 current_action_progress

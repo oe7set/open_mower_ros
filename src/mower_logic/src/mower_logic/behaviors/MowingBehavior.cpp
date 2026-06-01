@@ -23,6 +23,7 @@
 #include <rosbag/bag.h>
 #include <rosbag/view.h>
 
+#include <algorithm>
 #include <cmath>
 #include <event_publisher/event_publisher.hpp>
 #include <limits>
@@ -431,6 +432,18 @@ bool MowingBehavior::create_mowing_plan(int area_index) {
   if (!pathClient.call(pathSrv)) {
     ROS_ERROR_STREAM("MowingBehavior: Error during coverage planning");
     return false;
+  }
+
+  // The coverage planner falls back to a linear fill when the requested pattern produces
+  // no usable infill for (part of) the area. Surface that so the user understands why a
+  // scheduled/parametrised run did not mow the pattern they picked on this area.
+  if (pathSrv.response.fill_fallback) {
+    ROS_WARN_STREAM("MowingBehavior: requested fill pattern " << fill_type
+                                                              << " produced no infill on area " << area_index
+                                                              << "; planner fell back to linear fill");
+    open_mower::events::EventPublisher::warning(
+        "mowing.fill_fallback", "Requested mow pattern produced no infill; used linear fill instead",
+        {{"area_index", area_index}, {"requested_fill", fill_type}, {"run_id", requestedRunId}});
   }
 
   currentMowingPaths = pathSrv.response.paths;
@@ -847,6 +860,31 @@ int16_t MowingBehavior::get_current_path() {
 
 int16_t MowingBehavior::get_current_path_index() {
   return currentMowingPathIndex;
+}
+
+float MowingBehavior::get_current_progress() {
+  if (currentMowingPaths.empty()) {
+    return 0.0f;
+  }
+  size_t total_poses = 0;
+  size_t done_poses = 0;
+  for (size_t i = 0; i < currentMowingPaths.size(); i++) {
+    const size_t poses = currentMowingPaths[i].path.poses.size();
+    total_poses += poses;
+    if (static_cast<int>(i) < currentMowingPath) {
+      // Fully mowed paths contribute all of their poses.
+      done_poses += poses;
+    } else if (static_cast<int>(i) == currentMowingPath) {
+      // The path currently being mowed contributes its consumed pose count, clamped so a
+      // stale index (the FTC planner can report an index beyond the path on SUCCEEDED)
+      // can never push progress above 1.0.
+      done_poses += std::min(static_cast<size_t>(std::max(currentMowingPathIndex, 0)), poses);
+    }
+  }
+  if (total_poses == 0) {
+    return 0.0f;
+  }
+  return static_cast<float>(done_poses) / static_cast<float>(total_poses);
 }
 
 MowingBehavior::MowingBehavior() {

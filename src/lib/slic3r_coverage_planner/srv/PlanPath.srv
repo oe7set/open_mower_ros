@@ -5,6 +5,13 @@ uint8 FILL_CONCENTRIC=1
 uint8 FILL_CONCENTRIC_CIRCLE=2
 # Space-filling Hilbert curve.
 uint8 FILL_HILBERT=3
+# Grid (rectilinear in two perpendicular passes) — robust, even coverage.
+uint8 FILL_GRID=4
+# Honeycomb — robust, even coverage.
+uint8 FILL_HONEYCOMB=5
+# Octagram spiral — a space-filling curve like FILL_HILBERT/FILL_CONCENTRIC_CIRCLE,
+# so it shares their geometry sensitivity and relies on the linear fallback.
+uint8 FILL_OCTAGRAM=6
 uint8 fill_type
 float64 angle
 float64 distance
@@ -18,3 +25,6 @@ geometry_msgs/Polygon outline
 geometry_msgs/Polygon[] holes
 ---
 Path[] paths
+# True if at least one area sub-region produced no usable infill for the
+# requested fill_type and was filled with FILL_LINEAR as a fallback instead.
+bool fill_fallback

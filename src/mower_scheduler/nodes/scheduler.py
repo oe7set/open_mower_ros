@@ -154,6 +154,9 @@ PATTERN_TO_FILL = {
     "concentric_lines": 1,   # FILL_CONCENTRIC (follows the area outline)
     "concentric_circle": 2,  # FILL_CONCENTRIC_CIRCLE (Archimedean spiral)
     "hilbert": 3,            # FILL_HILBERT
+    "grid": 4,               # FILL_GRID (rectilinear, two perpendicular passes)
+    "honeycomb": 5,          # FILL_HONEYCOMB
+    "octagram": 6,           # FILL_OCTAGRAM (octagram spiral)
 }
 VALID_PATTERNS = tuple(PATTERN_TO_FILL.keys())
 

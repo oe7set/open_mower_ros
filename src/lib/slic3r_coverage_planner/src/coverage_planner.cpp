@@ -10,6 +10,7 @@
 #include "Polyline.hpp"
 #include "Fill/FillRectilinear.hpp"
 #include "Fill/FillConcentric.hpp"
+#include "Fill/FillHoneycomb.hpp"
 
 
 #include "slic3r_coverage_planner/PlanPath.h"
@@ -476,13 +477,15 @@ bool planPath(slic3r_coverage_planner::PlanPathRequest &req, slic3r_coverage_pla
     if (!req.skip_fill) {
         ExPolygons expp = union_ex(inner);
 
-
-        // Go through the innermost poly and create the fill path using a Fill object
-        for (auto &poly: expp) {
+        // Builds the requested fill for a single sub-region and returns its raw infill
+        // polylines. A fresh Surface is created per call because fill_surface() may mutate
+        // the surface it operates on, so a failed non-linear attempt must not leak state
+        // into the linear fallback below.
+        auto run_fill = [&](uint8_t fill_type, const ExPolygon &poly) -> Slic3r::Polylines {
             Slic3r::Surface surface(Slic3r::SurfaceType::stBottom, poly);
 
             Slic3r::Fill *fill;
-            switch (req.fill_type) {
+            switch (fill_type) {
                 case slic3r_coverage_planner::PlanPathRequest::FILL_CONCENTRIC:
                     fill = new Slic3r::FillConcentric();
                     break;
@@ -494,12 +497,24 @@ bool planPath(slic3r_coverage_planner::PlanPathRequest &req, slic3r_coverage_pla
                 case slic3r_coverage_planner::PlanPathRequest::FILL_HILBERT:
                     fill = new Slic3r::FillHilbertCurve();
                     break;
+                case slic3r_coverage_planner::PlanPathRequest::FILL_GRID:
+                    fill = new Slic3r::FillGrid();
+                    break;
+                case slic3r_coverage_planner::PlanPathRequest::FILL_HONEYCOMB:
+                    fill = new Slic3r::FillHoneycomb();
+                    break;
+                case slic3r_coverage_planner::PlanPathRequest::FILL_OCTAGRAM:
+                    fill = new Slic3r::FillOctagramSpiral();
+                    break;
                 case slic3r_coverage_planner::PlanPathRequest::FILL_LINEAR:
                 default:
                     fill = new Slic3r::FillRectilinear();
                     break;
             }
-            fill->link_max_length = scale_(1.0);
+            // link_max_length is intentionally left at 0 (the original code set scale_(1.0)
+            // and then overwrote it with 0). Keep every other member in sync across types so
+            // the linear fallback uses the same parameters as the primary attempt.
+            fill->link_max_length = 0;
             fill->angle = req.angle;
             fill->z = scale_(1.0);
             fill->endpoints_overlap = 0;
@@ -508,14 +523,47 @@ bool planPath(slic3r_coverage_planner::PlanPathRequest &req, slic3r_coverage_pla
             fill->dont_adjust = true;
             fill->min_spacing = req.distance;
             fill->complete = false;
-            fill->link_max_length = 0;
-
-            ROS_INFO_STREAM("Starting Fill. Poly size:" << surface.expolygon.contour.points.size());
 
             Slic3r::Polylines lines = fill->fill_surface(surface);
-            append_to(fill_lines, lines);
             delete fill;
-            fill = nullptr;
+            return lines;
+        };
+
+        // A fill is "usable" only if at least one polyline survives the same resampling the
+        // postprocessing step applies later (>= 2 equally-spaced points). Space-filling
+        // curves (Hilbert / Archimedean / Octagram) can clip to zero or to single dots on
+        // certain area shapes/sizes/angles, which previously left the area with only its
+        // outline.
+        auto has_usable_fill = [](const Slic3r::Polylines &lines) -> bool {
+            for (const auto &line: lines) {
+                Slic3r::Polyline copy = line;
+                copy.remove_duplicate_points();
+                if (copy.equally_spaced_points(scale_(0.1)).size() >= 2) {
+                    return true;
+                }
+            }
+            return false;
+        };
+
+        // Go through the innermost poly and create the fill path using a Fill object
+        for (auto &poly: expp) {
+            ROS_INFO_STREAM("Starting Fill. Poly size:" << poly.contour.points.size());
+
+            Slic3r::Polylines lines = run_fill(req.fill_type, poly);
+
+            // Geometry-dependent fallback: some areas yield no infill for the chosen
+            // space-filling pattern. Retry that sub-region with the robust rectilinear fill
+            // so it always gets mowed instead of leaving only the outline.
+            if (!has_usable_fill(lines) &&
+                req.fill_type != slic3r_coverage_planner::PlanPathRequest::FILL_LINEAR) {
+                ROS_WARN_STREAM("Fill type " << static_cast<int>(req.fill_type)
+                                             << " produced no usable infill for this area; "
+                                                "falling back to FILL_LINEAR.");
+                res.fill_fallback = true;
+                lines = run_fill(slic3r_coverage_planner::PlanPathRequest::FILL_LINEAR, poly);
+            }
+
+            append_to(fill_lines, lines);
 
             ROS_INFO_STREAM("Fill Complete. Polyline count: " << lines.size());
             for (int i = 0; i < lines.size(); i++) {

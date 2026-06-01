@@ -133,6 +133,7 @@ void high_level_status(const mower_msgs::HighLevelStatus::ConstPtr& msg) {
   state.battery_percentage = msg->battery_percent;
   state.emergency = msg->emergency;
   state.is_charging = msg->is_charging;
+  state.current_action_progress = msg->current_action_progress;
 
   // Mirror GPS quality into the sensor pipeline so the Sensors page can chart
   // the long-term percentage. HighLevelStatus does not carry its own stamp,

@@ -369,10 +369,16 @@ void updateUI(const ros::TimerEvent& timer_event) {
     } catch (const std::runtime_error& re) {
       ROS_ERROR_STREAM("Error getting current path index: " << re.what());
     }
+    try {
+      high_level_status.current_action_progress = MowingBehavior::INSTANCE.get_current_progress();
+    } catch (const std::runtime_error& re) {
+      ROS_ERROR_STREAM("Error getting current progress: " << re.what());
+    }
   } else {
     high_level_status.current_area = -1;
     high_level_status.current_path = -1;
     high_level_status.current_path_index = -1;
+    high_level_status.current_action_progress = 0.0f;
   }
 
   if (currentBehavior) {

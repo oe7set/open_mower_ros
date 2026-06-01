@@ -124,6 +124,11 @@ class MowingBehavior : public Behavior {
 
   int16_t get_current_path_index();
 
+  // 0..1 fraction of total mowing poses completed across all paths of the current
+  // plan. Returns 0 when no plan is loaded. Reads members without locking, matching
+  // the other get_current_* accessors.
+  float get_current_progress();
+
   void handle_action(std::string action) override;
 
   void update_actions();
