@@ -2364,7 +2364,11 @@ void rpc_response_callback(const xbot_rpc::RpcResponse::ConstPtr &msg) {
     }
 
     json j = {{"jsonrpc", "2.0"}, {"result", result}, {"id", msg->id}};
-    try_publish("rpc/response", j.dump(2));
+    // Compact dump (no indent): the client parses this as JSON, so pretty-print
+    // whitespace is pure overhead — it inflated every RPC response ~25-30%,
+    // which made large payloads (e.g. telemetry.get_session) slow over the
+    // WebSocket broker.
+    try_publish("rpc/response", j.dump());
 }
 
 void rpc_error_callback(const xbot_rpc::RpcError::ConstPtr &msg) {
