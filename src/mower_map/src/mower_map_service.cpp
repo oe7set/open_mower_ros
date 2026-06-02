@@ -40,6 +40,7 @@
 #include "mower_map/GetMowingAreaSrv.h"
 #include "mower_map/SetDockingPointSrv.h"
 #include "mower_map/SetNavPointSrv.h"
+#include "slic3r_coverage_planner/PlanPath.h"
 
 // JSON for map storage
 #include <filesystem>
@@ -83,6 +84,9 @@ struct MapArea {
   int outline_count = -1;
   int outline_overlap_count = -1;
   double outline_offset = std::numeric_limits<double>::quiet_NaN();
+  int fill_type = -1;
+  double distance = std::numeric_limits<double>::quiet_NaN();
+  double speed_mps = std::numeric_limits<double>::quiet_NaN();
 };
 
 struct DockingStation {
@@ -126,6 +130,9 @@ void to_json(json& j, const MapArea& data) {
   if (data.outline_count >= 0) properties["outline_count"] = data.outline_count;
   if (data.outline_overlap_count >= 0) properties["outline_overlap_count"] = data.outline_overlap_count;
   if (!std::isnan(data.outline_offset)) properties["outline_offset"] = data.outline_offset;
+  if (data.fill_type >= 0) properties["fill_type"] = data.fill_type;
+  if (!std::isnan(data.distance)) properties["distance"] = data.distance;
+  if (!std::isnan(data.speed_mps)) properties["speed_mps"] = data.speed_mps;
   j["properties"] = properties;
   j["outline"] = data.outline;
 }
@@ -140,6 +147,9 @@ void from_json(const json& j, MapArea& data) {
   data.outline_count = properties.value("outline_count", -1);
   data.outline_overlap_count = properties.value("outline_overlap_count", -1);
   data.outline_offset = properties.value("outline_offset", std::numeric_limits<double>::quiet_NaN());
+  data.fill_type = properties.value("fill_type", -1);
+  data.distance = properties.value("distance", std::numeric_limits<double>::quiet_NaN());
+  data.speed_mps = properties.value("speed_mps", std::numeric_limits<double>::quiet_NaN());
   j.at("outline").get_to(data.outline);
 }
 
@@ -199,6 +209,35 @@ geometry_msgs::Pose fake_obstacle_pose;
 // The grid map. This is built from the polygons loaded from the file.
 grid_map::GridMap map;
 
+// Client to the slic3r coverage planner, used by the coverage.preview RPC to
+// compute the exact mowing path the planner would produce for a given outline
+// and parameters — without executing it. Initialised in main().
+ros::ServiceClient slic3r_preview_client;
+
+// Build a geometry_msgs::Polygon from a JSON array of [x, y] pairs (mower-
+// relative metres, like Area.outline). Takes the RPC callback's json type
+// (nlohmann::basic_json<>, distinct from this file's ordered_json alias) so a
+// `params[...]` subobject binds without a cross-specialisation copy. Throws
+// RpcException on a malformed point so the caller surfaces a clean JSON-RPC
+// invalid-params error.
+geometry_msgs::Polygon jsonToPolygon(const nlohmann::basic_json<>& points) {
+  geometry_msgs::Polygon poly;
+  if (!points.is_array()) {
+    throw xbot_rpc::RpcException(xbot_rpc::RpcError::ERROR_INVALID_PARAMS, "Polygon must be an array of [x, y] points");
+  }
+  for (const auto& pt : points) {
+    if (!pt.is_array() || pt.size() < 2) {
+      throw xbot_rpc::RpcException(xbot_rpc::RpcError::ERROR_INVALID_PARAMS, "Each polygon point must be [x, y]");
+    }
+    geometry_msgs::Point32 p;
+    p.x = pt[0].get<double>();
+    p.y = pt[1].get<double>();
+    p.z = 0.0;
+    poly.points.push_back(p);
+  }
+  return poly;
+}
+
 // clang-format off
 xbot_rpc::RpcProvider rpc_provider("mower_map_service", {{
   RPC_METHOD("map.replace", {
@@ -237,6 +276,51 @@ xbot_rpc::RpcProvider rpc_provider("mower_map_service", {{
     ros::param::set("/mower_logic/next_area_index", idx);
     ROS_INFO_STREAM("map.start_in_area set /mower_logic/next_area_index=" << idx);
     return nullptr;
+  }),
+  RPC_METHOD("coverage.preview", {
+    // Stateless proxy to the slic3r coverage planner: the frontend resolves all
+    // "use default" parameters against the live config and sends concrete
+    // values plus the (possibly unsaved) geometry, so the preview matches what
+    // MowingBehavior would request for a real run without executing it.
+    if (!params.is_object()) {
+      throw xbot_rpc::RpcException(xbot_rpc::RpcError::ERROR_INVALID_PARAMS,
+                                    "Expected by-name params {outline, ...}");
+    }
+    if (!params.contains("outline")) {
+      throw xbot_rpc::RpcException(xbot_rpc::RpcError::ERROR_INVALID_PARAMS, "Missing outline");
+    }
+
+    slic3r_coverage_planner::PlanPath srv;
+    srv.request.outline = jsonToPolygon(params["outline"]);
+    if (params.contains("holes") && params["holes"].is_array()) {
+      for (const auto& hole : params["holes"]) {
+        srv.request.holes.push_back(jsonToPolygon(hole));
+      }
+    }
+    srv.request.fill_type = static_cast<uint8_t>(params.value("fill_type", 0));
+    srv.request.angle = params.value("angle_rad", 0.0);
+    srv.request.distance = params.value("distance", 0.13);
+    srv.request.outer_offset = params.value("outer_offset", 0.0);
+    srv.request.outline_count = static_cast<uint8_t>(params.value("outline_count", 0));
+    srv.request.outline_overlap_count = static_cast<uint8_t>(params.value("outline_overlap_count", 0));
+    srv.request.skip_area_outline = params.value("skip_area_outline", false);
+    srv.request.skip_obstacle_outlines = params.value("skip_obstacle_outlines", false);
+    srv.request.skip_fill = params.value("skip_fill", false);
+
+    if (!slic3r_preview_client.call(srv)) {
+      throw xbot_rpc::RpcException(xbot_rpc::RpcError::ERROR_INTERNAL,
+                                    "Coverage planner call failed (is slic3r_coverage_planner running?)");
+    }
+
+    json paths = json::array();
+    for (const auto& p : srv.response.paths) {
+      json points = json::array();
+      for (const auto& pose : p.path.poses) {
+        points.push_back({pose.pose.position.x, pose.pose.position.y});
+      }
+      paths.push_back({{"is_outline", p.is_outline != 0}, {"points", std::move(points)}});
+    }
+    return json{{"paths", std::move(paths)}, {"fill_fallback", srv.response.fill_fallback}};
   }),
 }});
 // clang-format on
@@ -291,6 +375,9 @@ MapArea mowerMapAreaToInternal(const mower_map::MapArea& area, const std::string
   result.outline_count = area.outline_count;
   result.outline_overlap_count = area.outline_overlap_count;
   result.outline_offset = area.outline_offset;
+  result.fill_type = area.fill_type;
+  result.distance = area.distance;
+  result.speed_mps = area.speed_mps;
   result.outline = geometryPolygonToInternal(area.area);
   return result;
 }
@@ -306,6 +393,9 @@ mower_map::MapArea internalMapAreaToMower(const MapArea& area) {
   result.outline_count = area.outline_count;
   result.outline_overlap_count = area.outline_overlap_count;
   result.outline_offset = area.outline_offset;
+  result.fill_type = area.fill_type;
+  result.distance = area.distance;
+  result.speed_mps = area.speed_mps;
   result.area = internalPolygonToGeometry(area.outline);
   return result;
 }
@@ -806,6 +896,8 @@ int main(int argc, char** argv) {
   map_pub = n.advertise<nav_msgs::OccupancyGrid>("mower_map_service/map", 10, true);
   map_server_viz_array_pub = n.advertise<visualization_msgs::MarkerArray>("mower_map_service/map_viz", 10, true);
   map_size_pub = n.advertise<xbot_msgs::MapSize>("mower_map_service/map_size", 10, true);
+
+  slic3r_preview_client = n.serviceClient<slic3r_coverage_planner::PlanPath>("slic3r_coverage_planner/plan_path");
 
   rpc_provider.init();
 

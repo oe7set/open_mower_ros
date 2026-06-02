@@ -64,8 +64,16 @@ class MowingBehavior : public Behavior {
   // Consume the next_run param block into the requested* members when a fresh
   // scheduled run is pending; reset the overrides for a manual start.
   void consume_next_run();
-  // Push / restore the FTC planner mowing speed via dynamic_reconfigure.
-  void apply_speed_override();
+  // Capture the FTC planner's global mowing/traversal speeds once per run so
+  // they can be restored after a per-run or per-area speed override.
+  void capture_global_speeds();
+  // Write speed_slow/speed_fast to the FTC planner via dynamic_reconfigure.
+  bool set_ftc_speeds(double slow, double fast);
+  // Apply the effective mowing speed for the area about to be mowed (precedence
+  // per-run > per-area > global). A NaN/<=0 speed means "use global" and
+  // restores the captured speeds if a previous area had overridden them.
+  void apply_mow_speed(double speed);
+  // Restore the captured global FTC speeds (called on every exit path).
   void restore_speed_override();
 
   // Advance currentMowingArea to the next area to mow. Returns false when the

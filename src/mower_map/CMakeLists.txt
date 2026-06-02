@@ -22,6 +22,7 @@ find_package(catkin REQUIRED
         rosbag
         xbot_msgs
         xbot_rpc
+        slic3r_coverage_planner
         )
 
 ## System dependencies are found with CMake's conventions

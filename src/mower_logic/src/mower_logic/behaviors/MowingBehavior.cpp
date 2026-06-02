@@ -197,40 +197,47 @@ void MowingBehavior::consume_next_run() {
 // params live under /move_base_flex/FTCPlanner.
 static const char* FTC_NS = "/move_base_flex/FTCPlanner";
 
-void MowingBehavior::apply_speed_override() {
-  speedOverridden = false;
-  if (std::isnan(requestedSpeed) || requestedSpeed <= 0.0) {
-    return;
-  }
-
-  // Capture the current speeds so exit() can restore them. dynamic_reconfigure
-  // mirrors its values onto the param server, so a plain param read is enough.
+void MowingBehavior::capture_global_speeds() {
+  // Capture the current speeds so a per-run / per-area override can be restored
+  // afterwards. dynamic_reconfigure mirrors its values onto the param server,
+  // so a plain param read is enough.
   savedSpeedSlow = 0.15;
   savedSpeedFast = 0.4;
   ros::param::get(std::string(FTC_NS) + "/speed_slow", savedSpeedSlow);
   ros::param::get(std::string(FTC_NS) + "/speed_fast", savedSpeedFast);
+  speedOverridden = false;
+}
+
+bool MowingBehavior::set_ftc_speeds(double slow, double fast) {
+  dynamic_reconfigure::Reconfigure srv;
+  dynamic_reconfigure::DoubleParameter p_slow;
+  p_slow.name = "speed_slow";
+  p_slow.value = slow;
+  srv.request.config.doubles.push_back(p_slow);
+  dynamic_reconfigure::DoubleParameter p_fast;
+  p_fast.name = "speed_fast";
+  p_fast.value = fast;
+  srv.request.config.doubles.push_back(p_fast);
+  return ros::service::call(std::string(FTC_NS) + "/set_parameters", srv);
+}
+
+void MowingBehavior::apply_mow_speed(double speed) {
+  if (std::isnan(speed) || speed <= 0.0) {
+    // No override for this area — restore the captured global speeds if a
+    // previous area had overridden them, so each area mows at its own speed.
+    restore_speed_override();
+    return;
+  }
 
   // speed_slow is the actual mowing speed; speed_fast is the approach/traversal
   // speed. Override the mowing speed, and never let it exceed the traversal
   // speed (the planner assumes slow <= fast).
-  dynamic_reconfigure::Reconfigure srv;
-  dynamic_reconfigure::DoubleParameter p_slow;
-  p_slow.name = "speed_slow";
-  p_slow.value = requestedSpeed;
-  srv.request.config.doubles.push_back(p_slow);
-  if (requestedSpeed > savedSpeedFast) {
-    dynamic_reconfigure::DoubleParameter p_fast;
-    p_fast.name = "speed_fast";
-    p_fast.value = requestedSpeed;
-    srv.request.config.doubles.push_back(p_fast);
-  }
-
-  if (ros::service::call(std::string(FTC_NS) + "/set_parameters", srv)) {
+  if (set_ftc_speeds(speed, std::max(savedSpeedFast, speed))) {
     speedOverridden = true;
-    ROS_INFO_STREAM("MowingBehavior: overrode FTC mowing speed to " << requestedSpeed << " m/s (was " << savedSpeedSlow
-                                                                    << ")");
+    ROS_INFO_STREAM("MowingBehavior: set FTC mowing speed to " << speed << " m/s (global was " << savedSpeedSlow
+                                                               << ")");
   } else {
-    ROS_WARN_STREAM("MowingBehavior: failed to set FTC speed override; keeping global speed");
+    ROS_WARN_STREAM("MowingBehavior: failed to set FTC speed override; keeping current speed");
   }
 }
 
@@ -238,16 +245,7 @@ void MowingBehavior::restore_speed_override() {
   if (!speedOverridden) {
     return;
   }
-  dynamic_reconfigure::Reconfigure srv;
-  dynamic_reconfigure::DoubleParameter p_slow;
-  p_slow.name = "speed_slow";
-  p_slow.value = savedSpeedSlow;
-  srv.request.config.doubles.push_back(p_slow);
-  dynamic_reconfigure::DoubleParameter p_fast;
-  p_fast.name = "speed_fast";
-  p_fast.value = savedSpeedFast;
-  srv.request.config.doubles.push_back(p_fast);
-  if (ros::service::call(std::string(FTC_NS) + "/set_parameters", srv)) {
+  if (set_ftc_speeds(savedSpeedSlow, savedSpeedFast)) {
     ROS_INFO_STREAM("MowingBehavior: restored FTC speeds (slow=" << savedSpeedSlow << ", fast=" << savedSpeedFast
                                                                  << ")");
   } else {
@@ -263,7 +261,9 @@ void MowingBehavior::enter() {
   paused = aborted = false;
 
   consume_next_run();
-  apply_speed_override();
+  // Capture the global FTC speeds once; the effective per-run/per-area speed is
+  // applied inside create_mowing_plan() as each area's plan is built.
+  capture_global_speeds();
 
   for (auto& a : actions) {
     a.enabled = true;
@@ -410,11 +410,19 @@ bool MowingBehavior::create_mowing_plan(int area_index) {
     return (override != sentinel) ? override : global;
   };
 
-  // Fill pattern: a per-run override latched from the scheduler
-  // (requestedFillType, -1 = none) wins over the global default_mow_pattern.
-  // Values map directly onto the PlanPath fill enum.
-  int fill_type = (requestedFillType >= 0) ? requestedFillType : getConfig().default_mow_pattern;
+  // Fill pattern, precedence per-run > per-area > global. The per-run override
+  // is latched from the scheduler (requestedFillType, -1 = none); the per-area
+  // value lives on the map area (-1 = none). Values map directly onto the
+  // PlanPath fill enum.
+  int fill_type = (requestedFillType >= 0) ? requestedFillType
+                                           : overrideOrGlobal(area.fill_type, getConfig().default_mow_pattern, -1);
   ROS_INFO_STREAM("MowingBehavior: using fill pattern " << fill_type);
+
+  // Effective mowing speed, precedence per-run > per-area > global. Applied to
+  // the FTC planner now so this area mows at its own speed; restore_speed_
+  // override() inside apply_mow_speed() resets it for areas without a value.
+  double effectiveSpeed = !std::isnan(requestedSpeed) ? requestedSpeed : area.speed_mps;
+  apply_mow_speed(effectiveSpeed);
 
   slic3r_coverage_planner::PlanPath pathSrv;
   pathSrv.request.angle = angle;
@@ -428,7 +436,8 @@ bool MowingBehavior::create_mowing_plan(int area_index) {
   pathSrv.request.holes = area.obstacles;
   pathSrv.request.fill_type = static_cast<uint8_t>(fill_type);
   pathSrv.request.outer_offset = std::isnan(area.outline_offset) ? config.outline_offset : area.outline_offset;
-  pathSrv.request.distance = config.tool_width;
+  // Tool width / stripe spacing, per-area override (NaN = global tool_width).
+  pathSrv.request.distance = std::isnan(area.distance) ? config.tool_width : area.distance;
   if (!pathClient.call(pathSrv)) {
     ROS_ERROR_STREAM("MowingBehavior: Error during coverage planning");
     return false;

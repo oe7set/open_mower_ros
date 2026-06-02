@@ -33,6 +33,7 @@
     <exec_depend>geometry_msgs</exec_depend>
     <depend>xbot_msgs</depend>
     <depend>xbot_rpc</depend>
+    <depend>slic3r_coverage_planner</depend>
 
 
     <!-- The export tag contains other, unspecified, tags -->
