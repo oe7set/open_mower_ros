@@ -46,10 +46,11 @@ class MowingBehavior : public Behavior {
   // active areas" behavior (24/7 mode and manual whole-map starts).
   std::vector<int> requestedAreaQueue;
   size_t requestedAreaQueuePos;
-  int requestedFillType;      // slic3r fill enum; -1 = use default_mow_pattern
-  double requestedSpeed;      // m/s; NaN = use the global FTC planner speed
-  double requestedAngleDeg;   // absolute degrees; NaN = use global/auto angle
-  int requestedOutlineCount;  // perimeter passes; -1 = use per-area/global default
+  int requestedFillType;        // slic3r fill enum; -1 = use default_mow_pattern
+  double requestedSpeed;        // mowing speed m/s (FTC speed_slow); NaN = global
+  double requestedTravelSpeed;  // travel speed m/s (FTC speed_fast); NaN = global
+  double requestedAngleDeg;     // absolute degrees; NaN = use global/auto angle
+  int requestedOutlineCount;    // perimeter passes; -1 = use per-area/global default
   // Correlation id for the scheduler-dispatched run, echoed into mowing
   // lifecycle events so the scheduler can tie failures back to the occurrence
   // that triggered them. Empty for manual runs.
@@ -69,10 +70,12 @@ class MowingBehavior : public Behavior {
   void capture_global_speeds();
   // Write speed_slow/speed_fast to the FTC planner via dynamic_reconfigure.
   bool set_ftc_speeds(double slow, double fast);
-  // Apply the effective mowing speed for the area about to be mowed (precedence
-  // per-run > per-area > global). A NaN/<=0 speed means "use global" and
-  // restores the captured speeds if a previous area had overridden them.
-  void apply_mow_speed(double speed);
+  // Apply the effective mowing/travel speeds for the area about to be mowed
+  // (precedence per-run > per-area > global). A NaN/<=0 mowing speed means "use
+  // global" and restores the captured speeds if a previous area had overridden
+  // them; a NaN/<=0 travel speed keeps the captured global travel speed. The
+  // planner requires slow <= fast, which apply_mow_speed enforces.
+  void apply_mow_speed(double mowing_speed, double travel_speed);
   // Restore the captured global FTC speeds (called on every exit path).
   void restore_speed_override();
 

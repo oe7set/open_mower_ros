@@ -101,8 +101,8 @@ ABORT_ACTION_ID = "mower_logic:mowing/abort_mowing"
 NEXT_AREA_PARAM = "/mower_logic/next_area_index"
 # Namespace for the richer per-run dispatch block the scheduler writes before
 # firing: <ns>/area_indices (int[]), /pattern, /angle_deg, /speed_mps,
-# /outline_count, /stop_at_epoch, /run_id. MowingBehavior consumes and clears
-# area_indices on entry.
+# /travel_speed_mps, /outline_count, /stop_at_epoch, /run_id, /resume (bool).
+# MowingBehavior consumes and clears area_indices on entry.
 NEXT_RUN_PARAM = "/mower_logic/next_run"
 TICK_INTERVAL_SECONDS = 60.0
 # How far back a missed occurrence can still be picked up. Covers transient
@@ -385,15 +385,21 @@ class ScheduleStore:
                 candidates.append(Candidate(dict(s), most_recent_utc, stop_at))
         return candidates
 
-    def evaluate_windows(self, now_utc: datetime.datetime) -> list[Candidate]:
-        """Return time_window schedules whose daily window has just started and
-        has not yet fired today, as Candidates that stop at the window end.
+    def evaluate_window_status(self, now_utc: datetime.datetime) -> list[dict]:
+        """For every enabled time_window schedule, report whether its window is
+        open right now and, if so, the current opening's identity and bounds.
 
-        A window fires once per active day: the moment `now` is inside
-        [start, start+CATCHUP_WINDOW] on an enabled weekday and we have not
-        already fired for that day's window-start instant.
+        Unlike the once-per-day rrule firing, time_window execution is driven by
+        a state machine (SchedulerNode._reconcile_time_windows) that re-mows the
+        areas with a configurable wait and resumes after interruptions, so this
+        helper is a pure read of "is the window open and what are its bounds"
+        rather than a fire decision. Each entry:
+          {schedule, open, opening_key, occurrence_utc, stop_at_epoch}
+        opening_key is the local date the active window started on, so the state
+        machine resets per opening (also for midnight-crossing windows). EXDATEs
+        on the opening date close the window for that opening.
         """
-        candidates: list[Candidate] = []
+        out: list[dict] = []
         with self._lock:
             for s in self._schedules:
                 if not s.get("enabled", False) or s.get("mode") != MODE_TIME_WINDOW:
@@ -406,31 +412,52 @@ class ScheduleStore:
                 tz = self._zone_for(s)
                 now_local = now_utc.astimezone(tz)
                 days = window.get("days")
-                if days and WEEKDAY_CODES[now_local.weekday()] not in days:
-                    continue
-                start_local = now_local.replace(
-                    hour=start_hhmm[0], minute=start_hhmm[1], second=0, microsecond=0
-                )
-                # Only fire shortly after the window opens (within the catch-up
-                # window), never before it and never long after.
-                if now_local < start_local or now_local - start_local > CATCHUP_WINDOW:
-                    continue
-                start_utc = start_local.astimezone(datetime.timezone.utc)
-                last_fired = _parse_iso_utc(s.get("_last_fired_iso"))
-                if last_fired is not None and start_utc <= last_fired:
-                    continue
-                if self._is_exdate(s, start_utc):
-                    continue
-                end_local = now_local.replace(
-                    hour=end_hhmm[0], minute=end_hhmm[1], second=0, microsecond=0
-                )
-                # An end <= start means the window crosses midnight; push end to
-                # the next day so the stop time stays in the future.
-                if end_local <= start_local:
-                    end_local += datetime.timedelta(days=1)
-                stop_at = end_local.astimezone(datetime.timezone.utc).timestamp()
-                candidates.append(Candidate(dict(s), start_utc, stop_at))
-        return candidates
+                status = self._window_open_status(now_local, start_hhmm, end_hhmm, days)
+                entry: dict = {"schedule": dict(s), "open": status is not None}
+                if status is not None:
+                    start_local, end_local = status
+                    occurrence_utc = start_local.astimezone(datetime.timezone.utc)
+                    # An EXDATE on the opening day closes the window for that
+                    # opening, matching how time_area occurrences are skipped.
+                    if self._is_exdate(s, occurrence_utc):
+                        entry["open"] = False
+                    else:
+                        entry["opening_key"] = start_local.date().isoformat()
+                        entry["occurrence_utc"] = occurrence_utc
+                        entry["stop_at_epoch"] = end_local.astimezone(datetime.timezone.utc).timestamp()
+                out.append(entry)
+        return out
+
+    @staticmethod
+    def _window_open_status(
+        now_local: datetime.datetime,
+        start_hhmm: tuple,
+        end_hhmm: tuple,
+        days: Optional[list],
+    ) -> Optional[tuple]:
+        """Return (start_local, end_local) of the window opening active at
+        `now_local`, or None when closed. Handles midnight-crossing windows by
+        anchoring the active day to the day the window started on."""
+
+        def active_day(d: datetime.datetime) -> bool:
+            return (not days) or (WEEKDAY_CODES[d.weekday()] in days)
+
+        start_today = now_local.replace(hour=start_hhmm[0], minute=start_hhmm[1], second=0, microsecond=0)
+        end_today = now_local.replace(hour=end_hhmm[0], minute=end_hhmm[1], second=0, microsecond=0)
+        if end_today > start_today:
+            # Same-day window [start, end) on today's weekday.
+            if start_today <= now_local < end_today and active_day(start_today):
+                return (start_today, end_today)
+            return None
+        # Midnight-crossing window. Two possible active openings:
+        #   started today  -> [start_today, end_tomorrow)
+        #   started yesterday -> [start_yesterday, end_today)
+        if now_local >= start_today and active_day(start_today):
+            return (start_today, end_today + datetime.timedelta(days=1))
+        start_yesterday = start_today - datetime.timedelta(days=1)
+        if now_local < end_today and active_day(start_yesterday):
+            return (start_yesterday, end_today)
+        return None
 
     @staticmethod
     def _is_exdate(schedule: dict, occurrence_utc: datetime.datetime) -> bool:
@@ -644,6 +671,11 @@ class ScheduleStore:
             if not isinstance(speed, (int, float)) or speed <= 0:
                 raise RpcException(ERROR_INVALID_PARAMS, "overrides.speed_mps must be a positive number")
             out["speed_mps"] = float(speed)
+        travel_speed = value.get("travel_speed_mps")
+        if travel_speed is not None:
+            if not isinstance(travel_speed, (int, float)) or travel_speed <= 0:
+                raise RpcException(ERROR_INVALID_PARAMS, "overrides.travel_speed_mps must be a positive number")
+            out["travel_speed_mps"] = float(travel_speed)
         pattern = value.get("pattern")
         if pattern is not None:
             if pattern not in VALID_PATTERNS:
@@ -1024,6 +1056,29 @@ class SchedulerNode:
         self._run_lock = threading.Lock()
         self._active_run: Optional[dict] = None
         self._live_run_id: Optional[str] = None
+        # Per-time_window-schedule execution state, keyed by schedule id. A
+        # window mows all its areas, then (after area_wait_minutes) mows them
+        # again, repeating while the window is open; an interruption (active
+        # block window or the window-end stop-at-time) parks the pass in the
+        # "resume" phase so it continues from the mower's checkpoint when the
+        # window next allows. Guarded by its own lock because both the tick
+        # thread (dispatch) and the event-subscriber thread (phase transitions)
+        # touch it; never held while calling _dispatch_run (which takes
+        # _run_lock) so the two locks never nest.
+        #   phase: "idle"    — no pass started for this window opening yet
+        #          "mowing"  — a run we dispatched is (expected to be) running
+        #          "waiting" — a full pass finished; waiting out area_wait_minutes
+        #          "resume"  — a pass was interrupted; resume from checkpoint
+        #          "done"    — user stopped this pass; no auto-refire this opening
+        self._window_lock = threading.Lock()
+        self._window_states: dict = {}
+        # Per-schedule "a pass was interrupted before finishing" flag that
+        # outlives _window_states (which is dropped when the window closes), so
+        # an interruption at the window end resumes on the next opening rather
+        # than restarting. In-memory only: a scheduler restart clears it, after
+        # which the MowingBehavior checkpoint (plan digest) is the remaining
+        # best-effort resume path. Keyed by schedule id.
+        self._window_resume_pending: dict = {}
         # Whether the scheduler currently owns automatic_mode for a continuous
         # (24/7) schedule, and the last value it pushed, so it only writes on
         # change and can hand control back when no continuous schedule remains.
@@ -1091,7 +1146,8 @@ class SchedulerNode:
 
         status, reason = _RUN_OUTCOME_EVENTS[msg.type]
         # mowing.aborted to idle is a deliberate user stop, not a failure.
-        if msg.type == "mowing.aborted" and details.get("to_idle"):
+        user_stopped = msg.type == "mowing.aborted" and details.get("to_idle")
+        if user_stopped:
             status, reason = "aborted", "stopped_by_user"
         self.history.close_run(run_id, status, _utcnow(), reason=reason)
         # The run is over — drop our tracking so a later tick can't abort it and
@@ -1101,6 +1157,33 @@ class SchedulerNode:
                 self._live_run_id = None
             if self._active_run and self._active_run.get("run_id") == run_id:
                 self._active_run = None
+        # Advance the time_window state machine for the matching schedule.
+        #   completed             -> wait, then re-mow the whole set
+        #   aborted by user       -> done (no auto-refire this opening)
+        #   aborted otherwise     -> resume from the checkpoint when allowed
+        #     (block window / window-end stop-at-time interruption)
+        self._on_window_run_finished(run_id, completed=(msg.type == "mowing.session_completed"),
+                                     user_stopped=bool(user_stopped))
+
+    def _on_window_run_finished(self, run_id: str, completed: bool, user_stopped: bool) -> None:
+        with self._window_lock:
+            sid = next((k for k, ws in self._window_states.items() if ws.get("run_id") == run_id), None)
+            if sid is None:
+                return  # not one of our time_window passes
+            ws = self._window_states[sid]
+            if completed:
+                ws["phase"] = "waiting"
+                ws["last_completed_epoch"] = _utcnow().timestamp()
+                self._window_resume_pending.pop(sid, None)
+            elif user_stopped:
+                ws["phase"] = "done"
+                self._window_resume_pending.pop(sid, None)
+            else:
+                ws["phase"] = "resume"
+                # Remember the interruption beyond this opening: if the window
+                # closes before we get to resume, the next opening picks it up.
+                self._window_resume_pending[sid] = True
+            ws.pop("run_id", None)
 
     def _on_rpc(self, request: RpcRequest) -> None:
         method = request.method
@@ -1255,9 +1338,13 @@ class SchedulerNode:
         #    discrete runs; reconcile that ownership each tick.
         self._reconcile_continuous_mode(now_utc, state, block_window_active)
 
-        # 4. Collect discrete due runs: time_area (rrule occurrences) and
-        #    time_window (window-start crossings). Both share the firing path.
-        candidates = self.store.evaluate_due(now_utc) + self.store.evaluate_windows(now_utc)
+        # 4. time_window schedules run their own re-mow/resume state machine
+        #    (mow all areas, wait, repeat; resume after an interruption) rather
+        #    than firing once per day, so they are reconciled separately.
+        self._reconcile_time_windows(now_utc, state, block_window_active)
+
+        # 5. Collect discrete due runs from time_area rrule occurrences.
+        candidates = self.store.evaluate_due(now_utc)
         if not candidates:
             return
 
@@ -1395,6 +1482,117 @@ class SchedulerNode:
                 f" (all gated: {gated_reason})" if all_gated and gated_reason else "",
             )
 
+    def _reconcile_time_windows(
+        self, now_utc: datetime.datetime, state: Optional[RobotState], block_window_active: bool
+    ) -> None:
+        """Drive the re-mow/resume state machine for every time_window schedule.
+
+        For each schedule with an open window we either dispatch the first pass,
+        dispatch a resume (after an interruption), start the next pass once the
+        configured wait has elapsed, or do nothing (mower busy / gated / still
+        waiting). Phase transitions on run completion/abort happen in _on_event;
+        here we only act when the mower is idle and ungated. Closed windows drop
+        their state so the next opening starts fresh.
+        """
+        statuses = self.store.evaluate_window_status(now_utc)
+        open_keys = {st["schedule"]["id"]: st.get("opening_key") for st in statuses if st["open"]}
+
+        # Drop state for schedules whose window is closed or whose opening
+        # rolled over (new opening_key) so a fresh opening restarts cleanly.
+        with self._window_lock:
+            for sid in list(self._window_states.keys()):
+                ws = self._window_states[sid]
+                if sid not in open_keys or open_keys[sid] != ws.get("opening_key"):
+                    del self._window_states[sid]
+
+        for st in statuses:
+            if not st["open"]:
+                continue
+            schedule = st["schedule"]
+            sid = schedule["id"]
+            opening_key = st["opening_key"]
+            stop_at = st["stop_at_epoch"]
+            occurrence_utc = st["occurrence_utc"]
+
+            with self._window_lock:
+                ws = self._window_states.get(sid)
+                if ws is None:
+                    # A pass interrupted on a previous opening resumes on this
+                    # one (continue where the mower left off) rather than
+                    # restarting from the first area.
+                    initial_phase = "resume" if self._window_resume_pending.get(sid) else "idle"
+                    ws = {"opening_key": opening_key, "phase": initial_phase, "last_completed_epoch": 0.0}
+                    self._window_states[sid] = ws
+                phase = ws["phase"]
+                last_completed = ws["last_completed_epoch"]
+
+            if phase == "done":
+                # User stopped this opening's pass; no auto-refire until the
+                # window reopens (handled by the state-drop above).
+                continue
+
+            # Gate exactly like discrete firings: global state, block window,
+            # blocking day / holiday, and opt-in rain. A gated window keeps its
+            # phase so it can resume/continue once the gate clears.
+            global_reason = self._global_block_reason(state)
+            if global_reason == SKIP_NO_STATE or global_reason == SKIP_EMERGENCY:
+                continue
+            if block_window_active:
+                continue
+            blocked = self._blocked_reason(occurrence_utc, schedule)
+            if blocked:
+                self.store.record_skip(sid, blocked, now_utc)
+                continue
+            if schedule.get("weather", {}).get("skip_if_rain") and getattr(state, "rain_detected", False):
+                self.store.record_skip(sid, SKIP_RAIN, now_utc)
+                continue
+            # Mower not idle (charging, or already mowing our pass): wait.
+            if global_reason is not None:
+                continue
+
+            if phase == "mowing":
+                # A run is in flight; _on_event advances the phase on completion.
+                continue
+            if phase == "waiting":
+                wait_s = int(schedule.get("window", {}).get("area_wait_minutes", 0) or 0) * 60
+                if now_utc.timestamp() < last_completed + wait_s:
+                    continue  # still waiting out the inter-pass pause
+                self._dispatch_window_pass(schedule, occurrence_utc, now_utc, stop_at, sid, resume=False)
+            elif phase == "resume":
+                self._dispatch_window_pass(schedule, occurrence_utc, now_utc, stop_at, sid, resume=True)
+            else:  # "idle" — first pass of this opening
+                self._dispatch_window_pass(schedule, occurrence_utc, now_utc, stop_at, sid, resume=False)
+
+    def _dispatch_window_pass(
+        self,
+        schedule: dict,
+        occurrence_utc: datetime.datetime,
+        now_utc: datetime.datetime,
+        stop_at_epoch: float,
+        sid: str,
+        resume: bool,
+    ) -> None:
+        """Dispatch one time_window pass (fresh or resumed) and mark the state
+        machine as mowing, recording the run_id so _on_event can match its
+        outcome back to this schedule's window state."""
+        run_id = self._dispatch_run(
+            schedule_id=sid,
+            name=schedule["name"],
+            areas=schedule.get("areas"),
+            overrides=schedule.get("overrides"),
+            occurrence_utc=occurrence_utc,
+            now_utc=now_utc,
+            stop_at_epoch=stop_at_epoch,
+            mark_schedule_fired=True,
+            resume=resume,
+        )
+        with self._window_lock:
+            ws = self._window_states.get(sid)
+            if ws is not None:
+                ws["phase"] = "mowing"
+                ws["run_id"] = run_id
+        rospy.loginfo("time_window %s dispatched %s pass (run %s)", sid, "resume" if resume else "fresh", run_id)
+
     def _set_automatic_mode(self, mode: int) -> bool:
         """Push automatic_mode into mower_logic via dynamic_reconfigure."""
         try:
@@ -1459,6 +1657,7 @@ class SchedulerNode:
         now_utc: datetime.datetime,
         stop_at_epoch: float,
         mark_schedule_fired: bool,
+        resume: bool = False,
     ) -> str:
         """Hand a full run spec to MowingBehavior via the next_run param block
         and open a run-history entry. Shared by scheduled firings (_fire) and
@@ -1469,11 +1668,17 @@ class SchedulerNode:
         latches the whole block and clears pending on entry, so a resume after a
         charge cycle keeps the in-progress run. The legacy single next_area_index
         stays untouched for map.start_in_area.
+
+        `resume` re-issues a run interrupted by a block window or stop-at-time so
+        it continues from the saved checkpoint: MowingBehavior keeps its path
+        progress instead of restarting the area. Always written (default False)
+        so a stale True never leaks into a fresh run.
         """
         areas = [int(a) for a in (areas or [])]
         overrides = overrides or {}
         fill = _pattern_to_fill(overrides.get("pattern"))
         speed = overrides.get("speed_mps")
+        travel_speed = overrides.get("travel_speed_mps")
         angle = overrides.get("angle_deg")
         outline_count = overrides.get("outline_count")
         # Correlation id for this run, echoed by MowingBehavior into its
@@ -1483,10 +1688,14 @@ class SchedulerNode:
         rospy.set_param(NEXT_RUN_PARAM + "/area_indices", areas)
         rospy.set_param(NEXT_RUN_PARAM + "/pattern", int(fill) if fill is not None else -1)
         rospy.set_param(NEXT_RUN_PARAM + "/speed_mps", float(speed) if speed is not None else float("nan"))
+        rospy.set_param(
+            NEXT_RUN_PARAM + "/travel_speed_mps", float(travel_speed) if travel_speed is not None else float("nan")
+        )
         rospy.set_param(NEXT_RUN_PARAM + "/angle_deg", float(angle) if angle is not None else float("nan"))
         rospy.set_param(NEXT_RUN_PARAM + "/outline_count", int(outline_count) if outline_count is not None else -1)
         rospy.set_param(NEXT_RUN_PARAM + "/stop_at_epoch", float(stop_at_epoch))
         rospy.set_param(NEXT_RUN_PARAM + "/run_id", run_id)
+        rospy.set_param(NEXT_RUN_PARAM + "/resume", bool(resume))
         rospy.set_param(NEXT_RUN_PARAM + "/pending", True)
         if areas:
             rospy.loginfo("Firing run %s (%s) over area(s) %s", schedule_id, name, areas)

@@ -139,6 +139,18 @@ void MowingBehavior::consume_next_run() {
   // the separate legacy /mower_logic/next_area_index and never sets pending.
   bool pending = false;
   if (ros::param::getCached("/mower_logic/next_run/pending", pending) && pending) {
+    // A resume dispatch (next_run/resume=true) re-issues a run that was
+    // interrupted (block window / stop-at-time) so it picks up where it left
+    // off. The abort-to-dock path does not call reset(), so this singleton
+    // still holds currentMowingPaths and the path progress in memory; we latch
+    // the queue and overrides as usual but keep that progress, so execute()
+    // resumes the retained plan from currentMowingPathIndex. If the paths were
+    // lost (e.g. process restart, restore_checkpoint() rehydrated only the
+    // indices), create_mowing_plan() rebuilds them and the plan-digest match
+    // advances to the saved checkpoint instead of restarting the area.
+    bool resume = false;
+    ros::param::getCached("/mower_logic/next_run/resume", resume);
+
     std::vector<int> areas;
     ros::param::getCached("/mower_logic/next_run/area_indices", areas);
     requestedAreaQueue = areas;
@@ -148,6 +160,8 @@ void MowingBehavior::consume_next_run() {
     ros::param::getCached("/mower_logic/next_run/pattern", requestedFillType);
     requestedSpeed = std::numeric_limits<double>::quiet_NaN();
     ros::param::getCached("/mower_logic/next_run/speed_mps", requestedSpeed);
+    requestedTravelSpeed = std::numeric_limits<double>::quiet_NaN();
+    ros::param::getCached("/mower_logic/next_run/travel_speed_mps", requestedTravelSpeed);
     requestedAngleDeg = std::numeric_limits<double>::quiet_NaN();
     ros::param::getCached("/mower_logic/next_run/angle_deg", requestedAngleDeg);
     requestedOutlineCount = -1;
@@ -155,17 +169,36 @@ void MowingBehavior::consume_next_run() {
     requestedRunId.clear();
     ros::param::getCached("/mower_logic/next_run/run_id", requestedRunId);
 
-    if (!requestedAreaQueue.empty()) {
-      currentMowingArea = requestedAreaQueue.front();
+    if (resume) {
+      // Resume: keep currentMowingArea / currentMowingPath(Index) and the plan
+      // digest from the checkpoint so the area continues at the saved position.
+      // Fall back to the queue front only if we have no in-progress area.
+      if (currentMowingPaths.empty() && !requestedAreaQueue.empty()) {
+        currentMowingArea = requestedAreaQueue.front();
+      }
+      // Align the queue cursor with the area we are resuming so advance_to_next_
+      // area() continues through the rest of the list rather than from the top.
+      for (size_t i = 0; i < requestedAreaQueue.size(); i++) {
+        if (requestedAreaQueue[i] == currentMowingArea) {
+          requestedAreaQueuePos = i;
+          break;
+        }
+      }
+      ROS_INFO_STREAM("MowingBehavior: resuming scheduled run at area "
+                      << currentMowingArea << " path " << currentMowingPath << " index " << currentMowingPathIndex);
+    } else {
+      if (!requestedAreaQueue.empty()) {
+        currentMowingArea = requestedAreaQueue.front();
+      }
+      currentMowingPaths.clear();
+      currentMowingPath = 0;
+      currentMowingPathIndex = 0;
+      ROS_INFO_STREAM(
+          "MowingBehavior: starting scheduled run over "
+          << (requestedAreaQueue.empty() ? std::string("all active") : std::to_string(requestedAreaQueue.size()))
+          << " area(s), fill=" << requestedFillType << " speed=" << requestedSpeed << " travel_speed="
+          << requestedTravelSpeed << " angle_deg=" << requestedAngleDeg << " outline=" << requestedOutlineCount);
     }
-    currentMowingPaths.clear();
-    currentMowingPath = 0;
-    currentMowingPathIndex = 0;
-    ROS_INFO_STREAM(
-        "MowingBehavior: starting scheduled run over "
-        << (requestedAreaQueue.empty() ? std::string("all active") : std::to_string(requestedAreaQueue.size()))
-        << " area(s), fill=" << requestedFillType << " speed=" << requestedSpeed << " angle_deg=" << requestedAngleDeg
-        << " outline=" << requestedOutlineCount);
     ros::param::set("/mower_logic/next_run/pending", false);
     return;
   }
@@ -180,6 +213,7 @@ void MowingBehavior::consume_next_run() {
     requestedAreaQueuePos = 0;
     requestedFillType = -1;
     requestedSpeed = std::numeric_limits<double>::quiet_NaN();
+    requestedTravelSpeed = std::numeric_limits<double>::quiet_NaN();
     requestedAngleDeg = std::numeric_limits<double>::quiet_NaN();
     requestedOutlineCount = -1;
     requestedRunId.clear();
@@ -221,8 +255,11 @@ bool MowingBehavior::set_ftc_speeds(double slow, double fast) {
   return ros::service::call(std::string(FTC_NS) + "/set_parameters", srv);
 }
 
-void MowingBehavior::apply_mow_speed(double speed) {
-  if (std::isnan(speed) || speed <= 0.0) {
+void MowingBehavior::apply_mow_speed(double mowing_speed, double travel_speed) {
+  const bool mowing_override = !std::isnan(mowing_speed) && mowing_speed > 0.0;
+  const bool travel_override = !std::isnan(travel_speed) && travel_speed > 0.0;
+
+  if (!mowing_override && !travel_override) {
     // No override for this area — restore the captured global speeds if a
     // previous area had overridden them, so each area mows at its own speed.
     restore_speed_override();
@@ -230,12 +267,18 @@ void MowingBehavior::apply_mow_speed(double speed) {
   }
 
   // speed_slow is the actual mowing speed; speed_fast is the approach/traversal
-  // speed. Override the mowing speed, and never let it exceed the traversal
-  // speed (the planner assumes slow <= fast).
-  if (set_ftc_speeds(speed, std::max(savedSpeedFast, speed))) {
+  // speed. Apply whichever is overridden and keep the captured global for the
+  // other. The planner assumes slow <= fast, so clamp the effective slow to the
+  // effective fast.
+  double slow = mowing_override ? mowing_speed : savedSpeedSlow;
+  double fast = travel_override ? travel_speed : savedSpeedFast;
+  if (slow > fast) {
+    slow = fast;
+  }
+  if (set_ftc_speeds(slow, fast)) {
     speedOverridden = true;
-    ROS_INFO_STREAM("MowingBehavior: set FTC mowing speed to " << speed << " m/s (global was " << savedSpeedSlow
-                                                               << ")");
+    ROS_INFO_STREAM("MowingBehavior: set FTC speeds slow=" << slow << " fast=" << fast << " m/s (global was slow="
+                                                           << savedSpeedSlow << " fast=" << savedSpeedFast << ")");
   } else {
     ROS_WARN_STREAM("MowingBehavior: failed to set FTC speed override; keeping current speed");
   }
@@ -311,6 +354,7 @@ void MowingBehavior::reset() {
   requestedAreaQueuePos = 0;
   requestedFillType = -1;
   requestedSpeed = std::numeric_limits<double>::quiet_NaN();
+  requestedTravelSpeed = std::numeric_limits<double>::quiet_NaN();
   requestedAngleDeg = std::numeric_limits<double>::quiet_NaN();
   requestedOutlineCount = -1;
   // increase cumulative mowing angle offset increment
@@ -418,11 +462,12 @@ bool MowingBehavior::create_mowing_plan(int area_index) {
                                            : overrideOrGlobal(area.fill_type, getConfig().default_mow_pattern, -1);
   ROS_INFO_STREAM("MowingBehavior: using fill pattern " << fill_type);
 
-  // Effective mowing speed, precedence per-run > per-area > global. Applied to
-  // the FTC planner now so this area mows at its own speed; restore_speed_
+  // Effective mowing speed, precedence per-run > per-area > global. Travel speed
+  // has no per-area value, so it is per-run only (NaN keeps the global). Applied
+  // to the FTC planner now so this area mows at its own speed; restore_speed_
   // override() inside apply_mow_speed() resets it for areas without a value.
   double effectiveSpeed = !std::isnan(requestedSpeed) ? requestedSpeed : area.speed_mps;
-  apply_mow_speed(effectiveSpeed);
+  apply_mow_speed(effectiveSpeed, requestedTravelSpeed);
 
   slic3r_coverage_planner::PlanPath pathSrv;
   pathSrv.request.angle = angle;
@@ -903,6 +948,7 @@ MowingBehavior::MowingBehavior() {
   requestedAreaQueuePos = 0;
   requestedFillType = -1;
   requestedSpeed = std::numeric_limits<double>::quiet_NaN();
+  requestedTravelSpeed = std::numeric_limits<double>::quiet_NaN();
   requestedAngleDeg = std::numeric_limits<double>::quiet_NaN();
   requestedOutlineCount = -1;
   speedOverridden = false;
