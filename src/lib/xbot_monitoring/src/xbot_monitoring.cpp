@@ -53,6 +53,8 @@
 #include "xbot_msgs/ActionInfo.h"
 #include "xbot_msgs/MapOverlay.h"
 #include "mower_msgs/HighLevelControlSrv.h"
+#include "mower_msgs/Bms.h"
+#include "mower_msgs/Power.h"
 #include "xbot_rpc/RpcError.h"
 #include "xbot_rpc/RpcRequest.h"
 #include "xbot_rpc/RpcResponse.h"
@@ -482,6 +484,76 @@ std::string event_store_path;
 // consumed by the sensors.history* RPCs so the frontend can show charts
 // immediately on connect instead of waiting for live samples.
 xbot_monitoring::sensors_history::SensorHistory sensor_history;
+
+// Latest battery/charger telemetry, cached so battery.get_telemetry can answer
+// instantly and so bms/json can merge BMS + Power into a single payload. Only
+// platforms with a smart BMS publish on /ll/bms; /ll/power is present on every
+// V2 platform. The have_* flags let the snapshot distinguish "no data yet" from
+// "genuinely zero". Guarded by bms_power_mutex.
+std::mutex bms_power_mutex;
+mower_msgs::Bms last_bms;
+mower_msgs::Power last_power;
+bool have_bms = false;
+bool have_power = false;
+
+// Builds the merged battery telemetry snapshot from the cached BMS + Power
+// messages. Caller must hold bms_power_mutex. `present` reflects whether a smart
+// BMS has reported (it carries the per-cell / capacity / cycle data); charger
+// fields are filled from Power independently so non-BMS platforms still get the
+// basic charge state. The BMS Extra Data is a JSON string produced by the
+// firmware (cells, manufacturer, design specs, absolute SoC); it is parsed
+// best-effort and merged in — a malformed or empty string is treated as "no
+// structured data" rather than failing the whole snapshot.
+static json build_bms_telemetry_json() {
+    json j = json::object();
+    j["present"] = have_bms;
+
+    if (have_bms) {
+        j["voltage"] = last_bms.voltage;
+        j["current"] = last_bms.current;
+        j["relative_state_of_charge"] = last_bms.relative_state_of_charge;
+        j["remaining_capacity"] = last_bms.remaining_capacity;
+        j["full_charge_capacity"] = last_bms.full_charge_capacity;
+        j["cycle_count"] = last_bms.cycle_count;
+        j["temperature"] = last_bms.temperature;
+        j["battery_status"] = last_bms.battery_status;
+        // Wall-clock millisecond stamp so the app can age the reading out.
+        j["ts_ms"] = static_cast<int64_t>(last_bms.stamp.toNSec() / 1000000);
+
+        // Merge the firmware's Extra Data JSON (cells, mfr/serial, design specs,
+        // absolute_soc). Keys land at the top level alongside the scalars above.
+        if (!last_bms.extra_data.empty()) {
+            try {
+                json extra = json::parse(last_bms.extra_data);
+                if (extra.is_object()) {
+                    for (auto it = extra.begin(); it != extra.end(); ++it) {
+                        j[it.key()] = it.value();
+                    }
+                }
+            } catch (const json::exception &e) {
+                ROS_WARN_STREAM_THROTTLE(30.0, "bms: extra_data is not valid JSON: " << e.what());
+            }
+        }
+    }
+
+    if (have_power) {
+        j["charge_voltage"] = last_power.charge_voltage;
+        j["charge_current"] = last_power.charge_current;
+        j["battery_voltage"] = last_power.battery_voltage;
+        j["battery_pct"] = last_power.battery_pct;
+        j["charger_status"] = last_power.charger_status;
+        j["charger_enabled"] = last_power.charger_enabled;
+        j["dcdc_input_current"] = last_power.dcdc_input_current;
+        j["charger_input_current"] = last_power.charger_input_current;
+        if (!have_bms) {
+            // No BMS stamp available — stamp from Power so the app can still age it.
+            j["ts_ms"] = static_cast<int64_t>(last_power.stamp.toNSec() / 1000000);
+        }
+    }
+
+    return j;
+}
+
 std::mutex event_persist_mutex;
 std::chrono::steady_clock::time_point event_persist_pending_until{};
 std::thread event_persist_thread;
@@ -1303,6 +1375,17 @@ xbot_rpc::RpcProvider rpc_provider("xbot_monitoring", {{
         }
         return result;
     }),
+    RPC_METHOD("battery.get_telemetry", {
+        // Return the latest cached BMS + charger snapshot for the Battery page.
+        // {present:false} when nothing has reported yet; on a platform without a
+        // smart BMS, present stays false but the charger fields from /ll/power
+        // are still included. Mirrors the live bms/json payload exactly.
+        std::lock_guard<std::mutex> lk(bms_power_mutex);
+        if (!have_bms && !have_power) {
+            return json::object({{"present", false}});
+        }
+        return build_bms_telemetry_json();
+    }),
     RPC_METHOD("events.list", {
         // Params (all optional):
         //   limit: number, default 200, clamped to [1, 500]
@@ -2119,6 +2202,39 @@ void imu_data_callback(const sensor_msgs::Imu::ConstPtr &msg) {
     try_publish_binary("imu/stream", bson.data(), bson.size());
 }
 
+// Caches the latest charger telemetry. /ll/power ticks at ~1 Hz on every V2
+// platform; we only store it here and let the BMS callback (or the boot-time
+// publish) emit the merged bms/json so a single payload carries both sources.
+void power_state_callback(const mower_msgs::Power::ConstPtr &msg) {
+    std::lock_guard<std::mutex> lk(bms_power_mutex);
+    last_power = *msg;
+    have_power = true;
+}
+
+// Caches the latest smart-BMS telemetry and publishes the merged battery
+// snapshot on bms/json. Throttled to ~1 Hz using the message's own stamp (the
+// BMS service already ticks at 1 Hz, this just guards against bursts and
+// wall-clock jitter). Only platforms with a real BMS publish on /ll/bms.
+void bms_state_callback(const mower_msgs::Bms::ConstPtr &msg) {
+    constexpr double kPublishPeriodSeconds = 1.0;
+    static ros::Time last_publish_stamp(0, 0);
+
+    std::string payload;
+    {
+        std::lock_guard<std::mutex> lk(bms_power_mutex);
+        last_bms = *msg;
+        have_bms = true;
+
+        const ros::Time stamp = msg->stamp.isZero() ? ros::Time::now() : msg->stamp;
+        if (!last_publish_stamp.isZero() && (stamp - last_publish_stamp).toSec() < kPublishPeriodSeconds) {
+            return;
+        }
+        last_publish_stamp = stamp;
+        payload = build_bms_telemetry_json().dump();
+    }
+    try_publish("bms/json", payload);
+}
+
 void publish_actions() {
     json actions = json::array();
     {
@@ -2428,6 +2544,12 @@ int main(int argc, char **argv) {
     // Raw IMU subscription used exclusively by imu.calibrate_level. Always
     // active but a no-op until the RPC arms the collector.
     ros::Subscriber imuRawSubscriber = n->subscribe("ll/imu/data_raw", 50, imu_raw_callback);
+    // Battery / charger telemetry for the openmower-app Battery page. ll/bms is
+    // only published by platforms with a smart BMS (e.g. Sabo); ll/power is
+    // present everywhere. bms_state_callback caches both and republishes the
+    // merged snapshot on bms/json at ~1 Hz.
+    ros::Subscriber bmsSubscriber = n->subscribe("ll/bms", 10, bms_state_callback);
+    ros::Subscriber powerSubscriber = n->subscribe("ll/power", 10, power_state_callback);
     // Firmware version is published by HighLevelServiceInterface in mower_comms_v2
     // as a latched String (JSON: {git_hash, build_date}). Cache + republish via
     // version/json so the openmower-app sees the full version block.

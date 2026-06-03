@@ -14,6 +14,7 @@
 //
 
 #include <dynamic_reconfigure/client.h>
+#include <mower_msgs/Bms.h>
 #include <mower_msgs/ESCStatus.h>
 #include <mower_msgs/Power.h>
 #include <xbot_msgs/SensorDataString.h>
@@ -87,6 +88,14 @@ std::map<std::string, SensorConfig> sensor_configs{
   {"om_v_battery", {"V Battery", "V", xbot_msgs::SensorInfo::VALUE_DESCRIPTION_VOLTAGE, xbot_msgs::SensorInfo::TYPE_DOUBLE, nullptr, &set_limits_battery_v}},
   {"om_charge_current", {"Charge Current", "A", xbot_msgs::SensorInfo::VALUE_DESCRIPTION_CURRENT, xbot_msgs::SensorInfo::TYPE_DOUBLE, nullptr, &set_limits_charge_current, "", [](){ return !paramNh->param("/mower_logic/ignore_charging_current", false); }}},
   {"om_charge_state", {"Charge State", "", xbot_msgs::SensorInfo::VALUE_DESCRIPTION_UNKNOWN, xbot_msgs::SensorInfo::TYPE_STRING, nullptr}},
+  // Smart-BMS scalar telemetry (only published when a BMS reports on /ll/bms, e.g. the Sabo FSM-BMZ pack). Each
+  // entry feeds the existing sensor pipeline so the web app gets live values, 1 h history and charts for free.
+  {"om_bms_current", {"Battery Current", "A", xbot_msgs::SensorInfo::VALUE_DESCRIPTION_CURRENT, xbot_msgs::SensorInfo::TYPE_DOUBLE, nullptr}},
+  {"om_bms_temp", {"Battery Temp", "deg.C", xbot_msgs::SensorInfo::VALUE_DESCRIPTION_TEMPERATURE, xbot_msgs::SensorInfo::TYPE_DOUBLE, nullptr}},
+  {"om_bms_soc", {"State of Charge", "%", xbot_msgs::SensorInfo::VALUE_DESCRIPTION_PERCENT, xbot_msgs::SensorInfo::TYPE_DOUBLE, nullptr}},
+  {"om_bms_full_charge_capacity", {"Full Charge Capacity", "Ah", xbot_msgs::SensorInfo::VALUE_DESCRIPTION_UNKNOWN, xbot_msgs::SensorInfo::TYPE_DOUBLE, nullptr}},
+  {"om_bms_remaining_capacity", {"Remaining Capacity", "Ah", xbot_msgs::SensorInfo::VALUE_DESCRIPTION_UNKNOWN, xbot_msgs::SensorInfo::TYPE_DOUBLE, nullptr}},
+  {"om_bms_cycle_count", {"Charge Cycles", "", xbot_msgs::SensorInfo::VALUE_DESCRIPTION_UNKNOWN, xbot_msgs::SensorInfo::TYPE_DOUBLE, nullptr}},
   {"om_left_esc_temp", {"Left ESC Temp", "deg.C", xbot_msgs::SensorInfo::VALUE_DESCRIPTION_TEMPERATURE, xbot_msgs::SensorInfo::TYPE_DOUBLE, nullptr, &set_limits_esc_temp, "left_xesc"}},
   {"om_right_esc_temp", {"Right ESC Temp", "deg.C", xbot_msgs::SensorInfo::VALUE_DESCRIPTION_TEMPERATURE, xbot_msgs::SensorInfo::TYPE_DOUBLE, nullptr, &set_limits_esc_temp, "right_xesc"}},
   {"om_mow_esc_temp", {"Mow ESC Temp", "deg.C", xbot_msgs::SensorInfo::VALUE_DESCRIPTION_TEMPERATURE, xbot_msgs::SensorInfo::TYPE_DOUBLE, [](StatusPtr msg) { return msg->mower_esc_temperature; }, &set_limits_esc_temp, "mower_xesc"}},
@@ -398,6 +407,33 @@ void power_received(const mower_msgs::Power::ConstPtr& msg) {
   }
 }
 
+// Forwards smart-BMS telemetry from /ll/bms into the sensor pipeline. Only platforms with a real BMS (e.g. Sabo)
+// publish on this topic, so on every other platform this callback simply never fires. Each scalar is published as
+// its own sensor, giving the web app live values, 1 h history and charts without any extra plumbing.
+void bms_received(const mower_msgs::Bms::ConstPtr& msg) {
+  // Rate limit to 2Hz — the BMS service itself ticks at ~1 Hz, this just guards against bursts.
+  static ros::Time last_update{0};
+  if ((msg->stamp - last_update).toSec() < 0.5) return;
+  last_update = msg->stamp;
+
+  auto publish = [&msg](const std::string& sensor_id, double value) {
+    auto sc_it = sensor_configs.find(sensor_id);
+    if (sc_it == std::end(sensor_configs)) return;
+    xbot_msgs::SensorDataDouble sensor_data;
+    sensor_data.stamp = msg->stamp;
+    sensor_data.data = value;
+    sc_it->second.data_pub.publish(sensor_data);
+  };
+
+  publish("om_bms_current", msg->current);
+  publish("om_bms_temp", msg->temperature);
+  // relative_state_of_charge is 0..1 on the wire; the sensor is declared in percent.
+  publish("om_bms_soc", msg->relative_state_of_charge * 100.0);
+  publish("om_bms_full_charge_capacity", msg->full_charge_capacity);
+  publish("om_bms_remaining_capacity", msg->remaining_capacity);
+  publish("om_bms_cycle_count", static_cast<double>(msg->cycle_count));
+}
+
 void left_esc_status_received(const mower_msgs::ESCStatus::ConstPtr& msg) {
   // Rate limit to 2Hz
   static ros::Time last_update{0};
@@ -550,6 +586,7 @@ int main(int argc, char** argv) {
   ros::Subscriber state_sub = n->subscribe("mower_logic/current_state", 10, high_level_status);
   ros::Subscriber status_state_subscriber = n->subscribe("/ll/mower_status", 10, status_received);
   ros::Subscriber power_state_subscriber = n->subscribe("/ll/power", 10, power_received);
+  ros::Subscriber bms_state_subscriber = n->subscribe("/ll/bms", 10, bms_received);
   ros::Subscriber left_esc_status_state_subscriber =
       n->subscribe("/ll/diff_drive/left_esc_status", 10, left_esc_status_received);
   ros::Subscriber right_esc_status_state_subscriber =
