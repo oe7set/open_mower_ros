@@ -69,6 +69,15 @@ ACTIVE_STATES = {"MOWING", "PAUSED"}
 SAMPLE_HZ = 4.0
 SAMPLE_PERIOD_S = 1.0 / SAMPLE_HZ
 
+# Movement-gating: while the mower sits still (e.g. PAUSED waiting for an RTK
+# fix) writing 4 Hz produces hundreds of stacked points at one spot, which
+# bloats the file and dominates the heatmap. We only write a new sample once the
+# mower has moved at least MIN_MOVE_M, or MAX_STATIONARY_PERIOD_S has elapsed (a
+# heartbeat so a long pause still leaves a sparse trace), or the mowing state
+# changed (so MOWING/PAUSED segment boundaries are preserved exactly).
+MIN_MOVE_M = 0.05
+MAX_STATIONARY_PERIOD_S = 5.0
+
 # Session-IDs are 16-char lowercase hex (secrets.token_hex(8)). The RPC
 # guards every id parameter with this pattern to keep get_session paths
 # inside telemetry_path.
@@ -212,7 +221,20 @@ class TelemetryRecorder:
         self._imu_yaw: float = 0.0
         self._imu_pitch: float = 0.0
         self._imu_roll: float = 0.0
+        # Raw IMU: orientation quaternion (w,x,y,z), angular velocity (rad/s),
+        # linear acceleration (m/s^2). Cached straight off the Imu message.
+        self._imu_quat: tuple[float, float, float, float] = (1.0, 0.0, 0.0, 0.0)
+        self._imu_gyro: tuple[float, float, float] = (0.0, 0.0, 0.0)
+        self._imu_accel: tuple[float, float, float] = (0.0, 0.0, 0.0)
         self._sensor_values: dict[str, float] = {}
+
+        # Movement-gating bookkeeping: the pose/ts of the last sample actually
+        # written, so a stationary mower (e.g. paused waiting for RTK fix) does
+        # not pile up hundreds of near-identical points at one spot.
+        self._last_written_x: Optional[float] = None
+        self._last_written_y: Optional[float] = None
+        self._last_written_ts: Optional[float] = None
+        self._last_written_state: Optional[str] = None
 
     # ----- callbacks -------------------------------------------------------
 
@@ -248,10 +270,15 @@ class TelemetryRecorder:
         siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
         cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
         yaw = math.atan2(siny_cosp, cosy_cosp)
+        av = msg.angular_velocity
+        la = msg.linear_acceleration
         with self._lock:
             self._imu_roll = roll
             self._imu_pitch = pitch
             self._imu_yaw = yaw
+            self._imu_quat = (q.w, q.x, q.y, q.z)
+            self._imu_gyro = (av.x, av.y, av.z)
+            self._imu_accel = (la.x, la.y, la.z)
 
     def on_sensor_data(self, sensor_id: str, msg: SensorDataDouble) -> None:
         with self._lock:
@@ -260,33 +287,68 @@ class TelemetryRecorder:
     # ----- tick / IO -------------------------------------------------------
 
     def tick(self) -> None:
-        """Called from the main loop at SAMPLE_HZ; writes one JSONL line."""
+        """Called from the main loop at SAMPLE_HZ; writes one JSONL line when
+        movement-gating allows it."""
         with self._lock:
             if self._session_id is None or self._session_file is None:
                 return
             sample = self._build_sample_unlocked()
+            if not self._should_write_unlocked(sample):
+                return
             try:
                 self._session_file.write(json.dumps(sample, separators=(",", ":")))
                 self._session_file.write("\n")
                 self._sample_count += 1
+                self._last_written_x = sample.get("x")
+                self._last_written_y = sample.get("y")
+                self._last_written_ts = sample["ts"]
+                self._last_written_state = sample.get("state")
             except OSError as e:
                 rospy.logerr("telemetry write failed: %s", e)
+
+    def _should_write_unlocked(self, sample: dict) -> bool:
+        """Movement-gate: always write the first sample, on a state change, or
+        once the mower has moved MIN_MOVE_M; otherwise throttle a stationary
+        mower to a MAX_STATIONARY_PERIOD_S heartbeat."""
+        if self._last_written_ts is None:
+            return True
+        if sample.get("state") != self._last_written_state:
+            return True
+        x, y = sample.get("x"), sample.get("y")
+        if x is None or y is None or self._last_written_x is None or self._last_written_y is None:
+            # No pose to compare — fall back to the heartbeat throttle.
+            return (sample["ts"] - self._last_written_ts) >= MAX_STATIONARY_PERIOD_S
+        moved = math.hypot(x - self._last_written_x, y - self._last_written_y)
+        if moved >= MIN_MOVE_M:
+            return True
+        return (sample["ts"] - self._last_written_ts) >= MAX_STATIONARY_PERIOD_S
 
     def _build_sample_unlocked(self) -> dict:
         rs = self._robot_state
         sample: dict[str, Any] = {"ts": time.time()}
+        if self._last_state is not None:
+            sample["state"] = self._last_state
         if rs is not None:
             sample["x"] = float(rs.robot_pose.pose.pose.position.x)
             sample["y"] = float(rs.robot_pose.pose.pose.position.y)
             sample["gps_fix_type"] = int(rs.gps_fix_type)
             sample["gps_satellite_count"] = int(rs.gps_satellite_count)
             sample["gps_pdop"] = float(rs.gps_pdop)
+            # Reported position accuracy in metres (RTK fix ≈ a few cm).
+            sample["gps_accuracy"] = float(rs.robot_pose.position_accuracy)
             sample["wifi_dbm"] = int(rs.wifi_signal_dbm)
             # Send the same field name the openmower-app heatmap expects.
             sample["wifi_q"] = float(rs.wifi_link_quality)
         sample["yaw"] = self._imu_yaw
         sample["pitch"] = self._imu_pitch
         sample["roll"] = self._imu_roll
+        # Raw IMU: quaternion (qw,qx,qy,qz), gyro (gx,gy,gz), accel (ax,ay,az).
+        qw, qx, qy, qz = self._imu_quat
+        gx, gy, gz = self._imu_gyro
+        ax, ay, az = self._imu_accel
+        sample["qw"], sample["qx"], sample["qy"], sample["qz"] = qw, qx, qy, qz
+        sample["gx"], sample["gy"], sample["gz"] = gx, gy, gz
+        sample["ax"], sample["ay"], sample["az"] = ax, ay, az
         for sid, val in self._sensor_values.items():
             sample[sid] = val
         return sample
@@ -304,6 +366,11 @@ class TelemetryRecorder:
         self._session_id = sid
         self._session_start_ts = time.time()
         self._sample_count = 0
+        # Reset movement-gating so the first tick of the new session is written.
+        self._last_written_x = None
+        self._last_written_y = None
+        self._last_written_ts = None
+        self._last_written_state = None
         rospy.loginfo("telemetry: opened session %s at %s", sid, path)
 
     def _close_session(self) -> None:
@@ -394,15 +461,34 @@ class TelemetryRpcServer:
             if not isinstance(sid, str) or not SESSION_ID_RE.match(sid):
                 raise RpcException(ERROR_INVALID_PARAMS, "id must match ^[a-f0-9]{16}$")
             stride = 1
-            if isinstance(params, dict) and "stride" in params:
-                try:
-                    stride = max(1, int(params["stride"]))
-                except (TypeError, ValueError):
-                    raise RpcException(ERROR_INVALID_PARAMS, "stride must be a positive integer")
-            return self._read_session(sid, stride)
+            offset = 0
+            limit = MAX_SAMPLES_PER_RESPONSE
+            if isinstance(params, dict):
+                if "stride" in params:
+                    try:
+                        stride = max(1, int(params["stride"]))
+                    except (TypeError, ValueError):
+                        raise RpcException(ERROR_INVALID_PARAMS, "stride must be a positive integer")
+                # Pagination over the post-stride sequence: skip `offset` selected
+                # samples and return at most `limit`, so a large session can be
+                # fetched as several small responses instead of one huge payload.
+                if "offset" in params:
+                    try:
+                        offset = max(0, int(params["offset"]))
+                    except (TypeError, ValueError):
+                        raise RpcException(ERROR_INVALID_PARAMS, "offset must be a non-negative integer")
+                if "limit" in params and params["limit"] is not None:
+                    try:
+                        limit = int(params["limit"])
+                    except (TypeError, ValueError):
+                        raise RpcException(ERROR_INVALID_PARAMS, "limit must be a positive integer")
+                    if limit <= 0:
+                        raise RpcException(ERROR_INVALID_PARAMS, "limit must be a positive integer")
+                    limit = min(limit, MAX_SAMPLES_PER_RESPONSE)
+            return self._read_session(sid, stride, offset, limit)
         raise RpcException(ERROR_INTERNAL, f"Unhandled method: {method}")
 
-    def _read_session(self, sid: str, stride: int) -> dict:
+    def _read_session(self, sid: str, stride: int, offset: int = 0, limit: int = MAX_SAMPLES_PER_RESPONSE) -> dict:
         path = self.store.session_path_if_exists(sid)
         if path is None:
             raise RpcException(ERROR_INVALID_PARAMS, f"unknown session id: {sid}")
@@ -422,6 +508,11 @@ class TelemetryRpcServer:
             )
         samples: list[dict] = []
         truncated = False
+        # selected_index counts samples that pass the stride filter; offset/limit
+        # paginate over that sequence. We read line-by-line and stop as soon as
+        # we have one more than `limit` selected past the offset, so `truncated`
+        # signals the client to request the next page.
+        selected_index = 0
         with open(path, "r", encoding="utf-8") as f:
             for i, line in enumerate(f):
                 if i % stride != 0:
@@ -430,13 +521,20 @@ class TelemetryRpcServer:
                 if not line:
                     continue
                 try:
-                    samples.append(json.loads(line))
+                    parsed = json.loads(line)
                 except ValueError:
                     # Half-written final line on a recorder crash; skip.
                     continue
-                if len(samples) >= MAX_SAMPLES_PER_RESPONSE:
+                # This is a valid selected sample; apply pagination on its index.
+                idx = selected_index
+                selected_index += 1
+                if idx < offset:
+                    continue
+                if len(samples) >= limit:
+                    # There is at least one more selected sample beyond this page.
                     truncated = True
                     break
+                samples.append(parsed)
         result: dict[str, Any] = {"samples": samples}
         if truncated:
             result["truncated"] = True
