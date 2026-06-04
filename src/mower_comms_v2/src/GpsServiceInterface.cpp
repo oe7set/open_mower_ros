@@ -212,6 +212,8 @@ void GpsServiceInterface::OnVehicleHeadingAndAccuracyChanged(const double* new_v
   pose_msg_.orientation_accuracy = new_value[1];
   pose_msg_.orientation_valid = true;
   gnss_detail_msg_.vehicle_heading = static_cast<float>(new_value[0]);
+  // Heading accuracy is delivered in radians; the GNSS page shows degrees.
+  gnss_detail_msg_.heading_accuracy = static_cast<float>(new_value[1] * 180.0 / M_PI);
 }
 
 void GpsServiceInterface::OnSatelliteCountChanged(const uint8_t& new_value) {
@@ -262,6 +264,47 @@ void GpsServiceInterface::OnSatelliteDataChanged(const uint8_t* new_value, uint3
     gnss_detail_msg_.satellites.push_back(sat);
   }
   gnss_detail_msg_.sats_visible = gnss_detail_msg_.satellites.size();
+}
+
+void GpsServiceInterface::OnCorrectionAgeChanged(const float& new_value) {
+  gnss_detail_msg_.correction_age = new_value;
+}
+
+void GpsServiceInterface::OnRtkInfoChanged(const float* new_value, uint32_t length) {
+  if (length != 2) {
+    ROS_INFO_STREAM("OnRtkInfoChanged called with length " << length);
+    return;
+  }
+  // [baseline_len, diff_age]. (No RTK ambiguity ratio exists on the UM982.)
+  gnss_detail_msg_.baseline_len = new_value[0];
+  // diff_age (new_value[1]) is also delivered via OnCorrectionAgeChanged; keep
+  // the dedicated correction_age field as the single source there.
+}
+
+void GpsServiceInterface::OnSolutionStatusChanged(const uint8_t& new_value) {
+  gnss_detail_msg_.solution_status = new_value;
+}
+
+void GpsServiceInterface::OnHeadingInfoChanged(const float* new_value, uint32_t length) {
+  if (length != 2) {
+    ROS_INFO_STREAM("OnHeadingInfoChanged called with length " << length);
+    return;
+  }
+  // [heading_deg, heading_stddev_deg]. The page shows the stddev as accuracy;
+  // the heading itself also arrives as a radian via VehicleHeadingAndAccuracy.
+  gnss_detail_msg_.heading_accuracy = new_value[1];
+}
+
+void GpsServiceInterface::OnElevationCutoffChanged(const float& new_value) {
+  gnss_detail_msg_.elevation_cutoff = new_value;
+}
+
+void GpsServiceInterface::OnAntennaAgcChanged(const int8_t* new_value, uint32_t length) {
+  gnss_detail_msg_.antenna_agc.assign(new_value, new_value + length);
+}
+
+void GpsServiceInterface::OnJammingStatusChanged(const uint8_t* new_value, uint32_t length) {
+  gnss_detail_msg_.jamming.assign(new_value, new_value + length);
 }
 
 void GpsServiceInterface::OnTransactionEnd() {

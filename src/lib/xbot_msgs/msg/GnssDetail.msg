@@ -44,3 +44,21 @@ float32 motion_heading
 
 # Age of the last applied RTCM/NTRIP correction in seconds (0 = none yet).
 float32 correction_age
+
+# Dual-antenna baseline length in meters (Unicore). 0 = not reported.
+float32 baseline_len
+# Heading accuracy / standard deviation in degrees (dual-antenna). 0 = not reported.
+float32 heading_accuracy
+# Refined solution status: 0 none, 1 single, 2 DGPS, 3 float, 4 fixed.
+# 255 = not reported (fall back to fix_type/rtk_type).
+uint8 solution_status
+
+# Enforced elevation cutoff mask in degrees (Unicore PVTSLN). -1 = not reported.
+float32 elevation_cutoff
+
+# Per-antenna AGC (Unicore #AGC): ANT1 (master) = [0..4], ANT2 (slave) = [5..9],
+# per frequency band; -1 = unused band. Empty = not reported.
+int8[] antenna_agc
+# Jamming detection (Unicore #JAMSTATUS): [cw_ratio (0..255), cw_flag (0/1/2)].
+# Empty = not reported.
+uint8[] jamming

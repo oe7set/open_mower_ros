@@ -2250,6 +2250,14 @@ void gnss_detail_callback(const xbot_msgs::GnssDetail::ConstPtr &msg) {
     payload["vh"] = msg->vehicle_heading;
     payload["mh"] = msg->motion_heading;
     payload["age"] = msg->correction_age;
+    // UM982 / Unicore detail (0 / 255 / empty when not reported by the receiver).
+    payload["base"] = msg->baseline_len;
+    payload["hacc_hdg"] = msg->heading_accuracy;
+    payload["sol"] = msg->solution_status;
+    payload["cutoff"] = msg->elevation_cutoff;
+    // Dual-antenna AGC + jamming arrays — forwarded verbatim (empty when absent).
+    payload["agc"] = msg->antenna_agc;
+    payload["jam"] = msg->jamming;
     payload["ts_ms"] = static_cast<int64_t>(stamp.toNSec() / 1000000);
     payload["sats"] = std::move(sats);
 

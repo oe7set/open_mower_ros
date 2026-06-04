@@ -33,6 +33,13 @@ class GpsServiceInterface : public GpsServiceInterfaceBase {
   void OnPDOPChanged(const float& new_value) override;
   void OnDOPChanged(const float* new_value, uint32_t length) override;
   void OnSatelliteDataChanged(const uint8_t* new_value, uint32_t length) override;
+  void OnCorrectionAgeChanged(const float& new_value) override;
+  void OnRtkInfoChanged(const float* new_value, uint32_t length) override;
+  void OnSolutionStatusChanged(const uint8_t& new_value) override;
+  void OnHeadingInfoChanged(const float* new_value, uint32_t length) override;
+  void OnElevationCutoffChanged(const float& new_value) override;
+  void OnAntennaAgcChanged(const int8_t* new_value, uint32_t length) override;
+  void OnJammingStatusChanged(const uint8_t* new_value, uint32_t length) override;
 
  private:
   void OnTransactionStart(uint64_t timestamp) override;
