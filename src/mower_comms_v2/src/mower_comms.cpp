@@ -280,11 +280,13 @@ int main(int argc, char** argv) {
   // Detailed GPS fix metadata for the dashboard chip and the heatmap-page
   // correlation in the openmower-app.
   ros::Publisher gps_status_pub = n.advertise<xbot_msgs::GpsStatus>("ll/position/gps_status", 1);
+  // Per-satellite GNSS diagnostics for the u-center-style GNSS page.
+  ros::Publisher gnss_detail_pub = n.advertise<xbot_msgs::GnssDetail>("ll/position/gnss_detail", 1);
   bool absolute_coords = true;
   paramNh.getParam("services/gps/absolute_coords", absolute_coords);
-  gps_service = std::make_unique<GpsServiceInterface>(xbot::service_ids::GPS, ctx, gps_position_pub, nmea_pub,
-                                                      gps_status_pub, datum_lat, datum_long, datum_height, baud_rate,
-                                                      protocol, gps_port_index, absolute_coords);
+  gps_service = std::make_unique<GpsServiceInterface>(
+      xbot::service_ids::GPS, ctx, gps_position_pub, nmea_pub, gps_status_pub, gnss_detail_pub, datum_lat, datum_long,
+      datum_height, baud_rate, protocol, gps_port_index, absolute_coords);
   gps_service->Start();
 
   // Input service

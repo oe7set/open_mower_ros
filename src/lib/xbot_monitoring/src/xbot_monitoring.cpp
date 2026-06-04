@@ -41,6 +41,7 @@
 #include "xbot_msgs/SensorDataString.h"
 #include "xbot_msgs/SensorDataDouble.h"
 #include "xbot_msgs/RobotState.h"
+#include "xbot_msgs/GnssDetail.h"
 #include "sensor_msgs/Imu.h"
 #include <mqtt/async_client.h>
 #include <nlohmann/json.hpp>
@@ -2202,6 +2203,62 @@ void imu_data_callback(const sensor_msgs::Imu::ConstPtr &msg) {
     try_publish_binary("imu/stream", bson.data(), bson.size());
 }
 
+// Bridge for the per-satellite GNSS diagnostics consumed by the openmower-app
+// GNSS page. The driver publishes at the receiver's nav rate (~1 Hz); we cap
+// to ~4 Hz purely as a burst guard. Short BSON keys keep the ~30-row satellite
+// array compact on the WebSocket. Mirrors the imu/stream envelope shape.
+void gnss_detail_callback(const xbot_msgs::GnssDetail::ConstPtr &msg) {
+    constexpr double kPublishPeriodSeconds = 1.0 / 4.0;
+    static ros::Time last_publish_stamp(0, 0);
+
+    const ros::Time stamp = msg->header.stamp.isZero() ? ros::Time::now() : msg->header.stamp;
+    if (!last_publish_stamp.isZero() && (stamp - last_publish_stamp).toSec() < kPublishPeriodSeconds) {
+        return;
+    }
+    last_publish_stamp = stamp;
+
+    json sats = json::array();
+    for (const auto &s : msg->satellites) {
+        sats.push_back({
+            {"g", s.gnss_id},
+            {"s", s.sv_id},
+            {"c", s.cn0},
+            {"b", s.band},
+            {"e", s.elevation},
+            {"a", s.azimuth},
+            {"u", (s.flags & xbot_msgs::Satellite::FLAG_USED) != 0},
+            {"hl", (s.flags & xbot_msgs::Satellite::FLAG_HEALTHY) != 0},
+        });
+    }
+
+    json payload;
+    payload["ft"] = msg->fix_type;
+    payload["rtk"] = msg->rtk_type;
+    payload["used"] = msg->sats_used;
+    payload["vis"] = msg->sats_visible;
+    payload["dop"] = {
+        {"g", msg->gdop}, {"p", msg->pdop}, {"h", msg->hdop}, {"v", msg->vdop}, {"t", msg->tdop},
+    };
+    payload["hacc"] = msg->h_acc;
+    payload["vacc"] = msg->v_acc;
+    payload["lat"] = msg->lat;
+    payload["lon"] = msg->lon;
+    payload["h"] = msg->height;
+    payload["ve"] = msg->vel_e;
+    payload["vn"] = msg->vel_n;
+    payload["vu"] = msg->vel_u;
+    payload["vh"] = msg->vehicle_heading;
+    payload["mh"] = msg->motion_heading;
+    payload["age"] = msg->correction_age;
+    payload["ts_ms"] = static_cast<int64_t>(stamp.toNSec() / 1000000);
+    payload["sats"] = std::move(sats);
+
+    json envelope;
+    envelope["d"] = payload;
+    auto bson = json::to_bson(envelope);
+    try_publish_binary("gnss/stream", bson.data(), bson.size());
+}
+
 // Caches the latest charger telemetry. /ll/power ticks at ~1 Hz on every V2
 // platform; we only store it here and let the BMS callback (or the boot-time
 // publish) emit the merged bms/json so a single payload carries both sources.
@@ -2541,6 +2598,10 @@ int main(int argc, char **argv) {
     // populated quaternion) to MQTT as throttled BSON for the openmower-app
     // 3D viewer. See imu_orientation_filter package for the publisher side.
     ros::Subscriber imuDataSubscriber = n->subscribe("imu/data", 50, imu_data_callback);
+    // Per-satellite GNSS diagnostics for the openmower-app GNSS page, bridged
+    // to MQTT as throttled BSON on gnss/stream. Published by mower_comms_v2
+    // (v2) on ll/position/gnss_detail.
+    ros::Subscriber gnssDetailSubscriber = n->subscribe("ll/position/gnss_detail", 5, gnss_detail_callback);
     // Raw IMU subscription used exclusively by imu.calibrate_level. Always
     // active but a no-op until the RPC arms the collector.
     ros::Subscriber imuRawSubscriber = n->subscribe("ll/imu/data_raw", 50, imu_raw_callback);

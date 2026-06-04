@@ -6,6 +6,7 @@
 #define GPSSERVICEINTERFACE_H
 #include <ros/publisher.h>
 #include <xbot_msgs/AbsolutePose.h>
+#include <xbot_msgs/GnssDetail.h>
 #include <xbot_msgs/GpsStatus.h>
 
 #include <GpsServiceInterfaceBase.hpp>
@@ -14,20 +15,24 @@ class GpsServiceInterface : public GpsServiceInterfaceBase {
  public:
   GpsServiceInterface(uint16_t service_id, const xbot::serviceif::Context& ctx, const ros::Publisher& imu_publisher,
                       const ros::Publisher& nmea_publisher, const ros::Publisher& gps_status_publisher,
-                      double datum_lat, double datum_long, double datum_height, uint32_t baud_rate,
-                      const std::string& protocol, uint8_t port_index, bool absolute_coords);
+                      const ros::Publisher& gnss_detail_publisher, double datum_lat, double datum_long,
+                      double datum_height, uint32_t baud_rate, const std::string& protocol, uint8_t port_index,
+                      bool absolute_coords);
 
   bool OnConfigurationRequested(uint16_t service_id) override;
 
  protected:
   void OnPositionChanged(const double* new_value, uint32_t length) override;
   void OnPositionHorizontalAccuracyChanged(const double& new_value) override;
+  void OnPositionVerticalAccuracyChanged(const double& new_value) override;
   void OnFixTypeChanged(const char* new_value, uint32_t length) override;
   void OnMotionVectorENUChanged(const double* new_value, uint32_t length) override;
   void OnMotionHeadingAndAccuracyChanged(const double* new_value, uint32_t length) override;
   void OnVehicleHeadingAndAccuracyChanged(const double* new_value, uint32_t length) override;
   void OnSatelliteCountChanged(const uint8_t& new_value) override;
   void OnPDOPChanged(const float& new_value) override;
+  void OnDOPChanged(const float* new_value, uint32_t length) override;
+  void OnSatelliteDataChanged(const uint8_t* new_value, uint32_t length) override;
 
  private:
   void OnTransactionStart(uint64_t timestamp) override;
@@ -36,6 +41,7 @@ class GpsServiceInterface : public GpsServiceInterfaceBase {
   const ros::Publisher& absolute_pose_publisher_;
   const ros::Publisher& nmea_publisher_;
   const ros::Publisher& gps_status_publisher_;
+  const ros::Publisher& gnss_detail_publisher_;
 
   // Last known fix_type on the v2 service. We map the FIX/FLOAT string
   // delivered by the firmware to the same 0..5 scale the frontend expects.
@@ -57,6 +63,10 @@ class GpsServiceInterface : public GpsServiceInterfaceBase {
   double datum_e_, datum_n_, datum_u_;
   std::string datum_zone_;
   void SendNMEA(double lat_in, double lon_in);
+
+  // Accumulates the detailed GNSS snapshot across the service outputs of one
+  // transaction, published on gnss_detail_publisher_ in OnTransactionEnd.
+  xbot_msgs::GnssDetail gnss_detail_msg_{};
 };
 
 #endif  // GPSSERVICEINTERFACE_H
