@@ -590,9 +590,13 @@ void checkSafety(const ros::TimerEvent& timer_event) {
     rain_detected = true;
   }
 
+  // Area recording is a manual mode in which the mower never mows autonomously, so a
+  // "docking needed" reason (low battery, rain, manual pause, hot motor) must not abort
+  // it - otherwise the safety timer keeps kicking the user back to idle, making the mode
+  // impossible to enter. Treated like idle, which is already exempt above.
   if (dockingNeeded && currentBehavior != &DockingBehavior::INSTANCE &&
       currentBehavior != &UndockingBehavior::RETRY_INSTANCE && currentBehavior != &IdleBehavior::INSTANCE &&
-      currentBehavior != &IdleBehavior::DOCKED_INSTANCE) {
+      currentBehavior != &IdleBehavior::DOCKED_INSTANCE && currentBehavior != &AreaRecordingBehavior::INSTANCE) {
     ROS_INFO_STREAM(dockingReason.rdbuf());
     abortExecution();
   }
