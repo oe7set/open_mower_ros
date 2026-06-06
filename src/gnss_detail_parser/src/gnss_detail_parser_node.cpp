@@ -11,6 +11,8 @@
 #include <xbot_msgs/GnssDetail.h>
 #include <xbot_msgs/Satellite.h>
 
+#include <algorithm>
+#include <cctype>
 #include <cerrno>
 #include <cstring>
 #include <memory>
@@ -35,6 +37,9 @@ using gnss_detail_parser::GnssDetailState;
 using gnss_detail_parser::Parser;
 
 ros::Publisher g_detail_pub;
+// Wall time of the last published epoch; zero = none yet. Used by the read loop
+// to warn when bytes flow but no epoch is framed (the classic protocol mismatch).
+ros::Time g_last_epoch_time(0);
 
 // Map our accumulated detail state to the ROS message and publish it.
 void PublishDetail(const GnssDetailState& s) {
@@ -89,6 +94,7 @@ void PublishDetail(const GnssDetailState& s) {
   msg.jamming = s.jamming;
 
   g_detail_pub.publish(msg);
+  g_last_epoch_time = ros::Time::now();
 }
 
 // Resolve + connect a TCP client socket to host:port. Returns fd or -1.
@@ -133,8 +139,23 @@ int main(int argc, char** argv) {
   private_nh.param<std::string>("firmware_ip", host, "172.16.78.150");
   int port_i = 0;
   private_nh.param("firmware_port", port_i, 10000);
+  // Protocol resolution: the parser MUST match the protocol the firmware
+  // (mower_comms_v2) configured the receiver for, otherwise we run the wrong
+  // parser against the raw stream, never frame an epoch and publish nothing.
+  // Order: 1) explicit private ~protocol override (launch arg / OM_GNSS_PROTOCOL),
+  //        2) the single source of truth /ll/services/gps/protocol (YAML),
+  //        3) UBX fallback (matches openmower_defaults_v2.yaml).
   std::string protocol;
-  private_nh.param<std::string>("protocol", protocol, "UBX");
+  private_nh.param<std::string>("protocol", protocol, "");
+  if (protocol.empty()) {
+    n.param<std::string>("/ll/services/gps/protocol", protocol, "UBX");
+    ROS_INFO_STREAM("gnss_detail_parser: protocol from /ll/services/gps/protocol = " << protocol);
+  } else {
+    ROS_INFO_STREAM("gnss_detail_parser: protocol overridden via ~protocol = " << protocol);
+  }
+  // Normalize case so "nmea"/"Nmea" still selects the NMEA parser (YAML uses uppercase).
+  std::transform(protocol.begin(), protocol.end(), protocol.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
   bool send_config = true;
   private_nh.param("send_config", send_config, true);
 
@@ -182,6 +203,22 @@ int main(int argc, char** argv) {
       if (got > 0) {
         idle_reads = 0;
         parser->ProcessBytes(buf.data(), static_cast<size_t>(got));
+        // Data is flowing but we are not framing epochs — the usual cause is a
+        // protocol mismatch (wrong parser for this receiver's output). Surface it
+        // instead of failing silently.
+        constexpr double kEpochWarnSec = 15.0;
+        if (g_last_epoch_time.isZero()) {
+          ROS_WARN_THROTTLE(kEpochWarnSec,
+                            "gnss_detail_parser: receiving bytes but no GnssDetail epoch yet "
+                            "(protocol=%s) — check that the receiver protocol matches "
+                            "/ll/services/gps/protocol",
+                            protocol.c_str());
+        } else if ((ros::Time::now() - g_last_epoch_time).toSec() > kEpochWarnSec) {
+          ROS_WARN_THROTTLE(kEpochWarnSec,
+                            "gnss_detail_parser: no GnssDetail epoch for >%.0fs despite live stream "
+                            "(protocol=%s)",
+                            kEpochWarnSec, protocol.c_str());
+        }
       } else if (got == 0) {
         ROS_WARN("gnss_detail_parser: stream closed by firmware, reconnecting");
         break;

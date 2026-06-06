@@ -14,8 +14,11 @@
   <!-- xCore internal IP on the robot link (same target expose-gps tunnels to). -->
   <arg name="firmware_ip" default="$(optenv OM_GNSS_FIRMWARE_IP 172.16.78.150)"/>
   <arg name="firmware_port" default="10000"/>
-  <!-- Must match the receiver protocol configured for the GpsService (UBX/NMEA). -->
-  <arg name="protocol" default="$(optenv OM_GNSS_PROTOCOL UBX)"/>
+  <!-- Receiver protocol (UBX/NMEA). Empty by default: the node then reads the
+       single source of truth /ll/services/gps/protocol (loaded from the YAML
+       hierarchy by _params.launch), so it always matches what the firmware
+       configured. Set OM_GNSS_PROTOCOL or pass protocol:= to force a value. -->
+  <arg name="protocol" default="$(optenv OM_GNSS_PROTOCOL)"/>
 
   <node pkg="gnss_detail_parser" type="gnss_detail_parser_node" name="gnss_detail_parser"
         output="screen" respawn="true" respawn_delay="5"
