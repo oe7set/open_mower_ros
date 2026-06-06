@@ -16,15 +16,13 @@
 GpsServiceInterface::GpsServiceInterface(uint16_t service_id, const xbot::serviceif::Context& ctx,
                                          const ros::Publisher& absolute_pose_publisher,
                                          const ros::Publisher& nmea_publisher,
-                                         const ros::Publisher& gps_status_publisher,
-                                         const ros::Publisher& gnss_detail_publisher, double datum_lat,
+                                         const ros::Publisher& gps_status_publisher, double datum_lat,
                                          double datum_long, double datum_height, uint32_t baud_rate,
                                          const std::string& protocol, uint8_t port_index, bool absolute_coords)
     : GpsServiceInterfaceBase(service_id, ctx),
       absolute_pose_publisher_(absolute_pose_publisher),
       nmea_publisher_(nmea_publisher),
       gps_status_publisher_(gps_status_publisher),
-      gnss_detail_publisher_(gnss_detail_publisher),
       baud_rate_(baud_rate),
       protocol_(protocol),
       port_index_(port_index),
@@ -106,10 +104,6 @@ void GpsServiceInterface::OnTransactionStart(uint64_t timestamp) {
   pose_msg_.orientation_valid = false;
   pose_msg_.sensor_stamp = timestamp / 1000;
   pose_msg_.flags = 0;
-
-  gnss_detail_msg_.header.frame_id = "gps";
-  gnss_detail_msg_.header.stamp = pose_msg_.header.stamp;
-  gnss_detail_msg_.header.seq++;
 }
 
 void GpsServiceInterface::OnPositionChanged(const double* new_value, uint32_t length) {
@@ -126,8 +120,6 @@ void GpsServiceInterface::OnPositionChanged(const double* new_value, uint32_t le
     pose_msg_.pose.pose.position.x = e - datum_e_;
     pose_msg_.pose.pose.position.y = n - datum_n_;
     pose_msg_.pose.pose.position.z = new_value[2] - datum_u_;
-    gnss_detail_msg_.lat = new_value[0];
-    gnss_detail_msg_.lon = new_value[1];
   } else {
     double n = new_value[1] + datum_n_;
     double e = new_value[0] + datum_e_;
@@ -137,19 +129,11 @@ void GpsServiceInterface::OnPositionChanged(const double* new_value, uint32_t le
     pose_msg_.pose.pose.position.x = new_value[0];
     pose_msg_.pose.pose.position.y = new_value[1];
     pose_msg_.pose.pose.position.z = new_value[2];
-    gnss_detail_msg_.lat = lat;
-    gnss_detail_msg_.lon = lng;
   }
-  gnss_detail_msg_.height = static_cast<float>(new_value[2]);
 }
 
 void GpsServiceInterface::OnPositionHorizontalAccuracyChanged(const double& new_value) {
   pose_msg_.position_accuracy = static_cast<float>(new_value);
-  gnss_detail_msg_.h_acc = static_cast<float>(new_value);
-}
-
-void GpsServiceInterface::OnPositionVerticalAccuracyChanged(const double& new_value) {
-  gnss_detail_msg_.v_acc = static_cast<float>(new_value);
 }
 
 void GpsServiceInterface::OnFixTypeChanged(const char* new_value, uint32_t length) {
@@ -158,24 +142,20 @@ void GpsServiceInterface::OnFixTypeChanged(const char* new_value, uint32_t lengt
   if (type == "FIX") {
     pose_msg_.flags |= xbot_msgs::AbsolutePose::FLAG_GPS_RTK_FIXED;
     last_fix_type_ = 5;  // RTK fixed
-    gnss_detail_msg_.rtk_type = 2;
   } else if (type == "FLOAT") {
     pose_msg_.flags |= xbot_msgs::AbsolutePose::FLAG_GPS_RTK_FLOAT;
     last_fix_type_ = 4;  // RTK float
-    gnss_detail_msg_.rtk_type = 1;
   } else if (type == "NONE" || type == "INVALID" || length == 0) {
     // Firmware explicitly reports loss of fix — propagate that immediately
     // instead of holding the previous "FIX"/"FLOAT" until the position
     // watchdog in OnTransactionEnd fires.
     last_fix_type_ = 0;
-    gnss_detail_msg_.rtk_type = 0;
   } else {
     // Anything else the firmware reports — assume a 3D fix is at least there
     // (DGPS / 3D / 2D distinction isn't exposed by the v2 service). The
     // frontend mostly uses 5/4/anything-else for the RTK chip, so a single
     // "non-RTK fix" bucket is enough.
     last_fix_type_ = 2;
-    gnss_detail_msg_.rtk_type = 0;
   }
 }
 
@@ -188,9 +168,6 @@ void GpsServiceInterface::OnMotionVectorENUChanged(const double* new_value, uint
   pose_msg_.motion_vector.x = new_value[0];
   pose_msg_.motion_vector.y = new_value[1];
   pose_msg_.motion_vector.z = new_value[2];
-  gnss_detail_msg_.vel_e = static_cast<float>(new_value[0]);
-  gnss_detail_msg_.vel_n = static_cast<float>(new_value[1]);
-  gnss_detail_msg_.vel_u = static_cast<float>(new_value[2]);
 }
 
 void GpsServiceInterface::OnMotionHeadingAndAccuracyChanged(const double* new_value, uint32_t length) {
@@ -200,7 +177,6 @@ void GpsServiceInterface::OnMotionHeadingAndAccuracyChanged(const double* new_va
   }
   pose_msg_.motion_heading = new_value[0];
   pose_msg_.motion_vector_valid = true;
-  gnss_detail_msg_.motion_heading = static_cast<float>(new_value[0]);
 }
 
 void GpsServiceInterface::OnVehicleHeadingAndAccuracyChanged(const double* new_value, uint32_t length) {
@@ -211,100 +187,14 @@ void GpsServiceInterface::OnVehicleHeadingAndAccuracyChanged(const double* new_v
   pose_msg_.vehicle_heading = new_value[0];
   pose_msg_.orientation_accuracy = new_value[1];
   pose_msg_.orientation_valid = true;
-  gnss_detail_msg_.vehicle_heading = static_cast<float>(new_value[0]);
-  // Heading accuracy is delivered in radians; the GNSS page shows degrees.
-  gnss_detail_msg_.heading_accuracy = static_cast<float>(new_value[1] * 180.0 / M_PI);
 }
 
 void GpsServiceInterface::OnSatelliteCountChanged(const uint8_t& new_value) {
   last_satellite_count_ = new_value;
-  gnss_detail_msg_.sats_used = new_value;
 }
 
 void GpsServiceInterface::OnPDOPChanged(const float& new_value) {
   last_pdop_ = new_value;
-  gnss_detail_msg_.pdop = new_value;
-}
-
-void GpsServiceInterface::OnDOPChanged(const float* new_value, uint32_t length) {
-  if (length != 4) {
-    ROS_INFO_STREAM("OnDOPChanged called with length " << length);
-    return;
-  }
-  // [gdop, hdop, vdop, tdop]; pdop arrives on its own output.
-  gnss_detail_msg_.gdop = new_value[0];
-  gnss_detail_msg_.hdop = new_value[1];
-  gnss_detail_msg_.vdop = new_value[2];
-  gnss_detail_msg_.tdop = new_value[3];
-}
-
-void GpsServiceInterface::OnSatelliteDataChanged(const uint8_t* new_value, uint32_t length) {
-  // Self-describing packed buffer: byte 0 = count, then count * 8-byte records
-  // matching the firmware GpsStateCallback packing.
-  gnss_detail_msg_.satellites.clear();
-  if (length < 1) {
-    return;
-  }
-  const uint8_t count = new_value[0];
-  constexpr uint32_t kRecordSize = 8;
-  for (uint8_t i = 0; i < count; i++) {
-    const uint32_t off = 1 + static_cast<uint32_t>(i) * kRecordSize;
-    if (off + kRecordSize > length) {
-      ROS_WARN_STREAM("SatelliteData truncated: count " << static_cast<int>(count) << " exceeds payload " << length);
-      break;
-    }
-    xbot_msgs::Satellite sat;
-    sat.gnss_id = new_value[off + 0];
-    sat.sv_id = new_value[off + 1];
-    sat.cn0 = new_value[off + 2];
-    sat.band = new_value[off + 3];
-    sat.elevation = static_cast<int8_t>(new_value[off + 4]);
-    sat.azimuth = static_cast<int16_t>(new_value[off + 5] | (new_value[off + 6] << 8));
-    sat.flags = new_value[off + 7];
-    gnss_detail_msg_.satellites.push_back(sat);
-  }
-  gnss_detail_msg_.sats_visible = gnss_detail_msg_.satellites.size();
-}
-
-void GpsServiceInterface::OnCorrectionAgeChanged(const float& new_value) {
-  gnss_detail_msg_.correction_age = new_value;
-}
-
-void GpsServiceInterface::OnRtkInfoChanged(const float* new_value, uint32_t length) {
-  if (length != 2) {
-    ROS_INFO_STREAM("OnRtkInfoChanged called with length " << length);
-    return;
-  }
-  // [baseline_len, diff_age]. (No RTK ambiguity ratio exists on the UM982.)
-  gnss_detail_msg_.baseline_len = new_value[0];
-  // diff_age (new_value[1]) is also delivered via OnCorrectionAgeChanged; keep
-  // the dedicated correction_age field as the single source there.
-}
-
-void GpsServiceInterface::OnSolutionStatusChanged(const uint8_t& new_value) {
-  gnss_detail_msg_.solution_status = new_value;
-}
-
-void GpsServiceInterface::OnHeadingInfoChanged(const float* new_value, uint32_t length) {
-  if (length != 2) {
-    ROS_INFO_STREAM("OnHeadingInfoChanged called with length " << length);
-    return;
-  }
-  // [heading_deg, heading_stddev_deg]. The page shows the stddev as accuracy;
-  // the heading itself also arrives as a radian via VehicleHeadingAndAccuracy.
-  gnss_detail_msg_.heading_accuracy = new_value[1];
-}
-
-void GpsServiceInterface::OnElevationCutoffChanged(const float& new_value) {
-  gnss_detail_msg_.elevation_cutoff = new_value;
-}
-
-void GpsServiceInterface::OnAntennaAgcChanged(const int8_t* new_value, uint32_t length) {
-  gnss_detail_msg_.antenna_agc.assign(new_value, new_value + length);
-}
-
-void GpsServiceInterface::OnJammingStatusChanged(const uint8_t* new_value, uint32_t length) {
-  gnss_detail_msg_.jamming.assign(new_value, new_value + length);
 }
 
 void GpsServiceInterface::OnTransactionEnd() {
@@ -330,12 +220,4 @@ void GpsServiceInterface::OnTransactionEnd() {
   status_msg.satellite_count = last_satellite_count_;
   status_msg.pdop = last_pdop_;
   gps_status_publisher_.publish(status_msg);
-
-  // Mirror the (watchdog-corrected) fix quality into the detailed message and
-  // publish the GNSS diagnostics snapshot for the GNSS page.
-  gnss_detail_msg_.fix_type = last_fix_type_;
-  if (last_fix_type_ == 0) {
-    gnss_detail_msg_.rtk_type = 0;
-  }
-  gnss_detail_publisher_.publish(gnss_detail_msg_);
 }

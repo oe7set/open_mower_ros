@@ -1,0 +1,28 @@
+<?xml version="1.0"?>
+<launch>
+  <!-- Off-board GNSS detail parser for the v2 firmware. Connects to the
+       firmware GPS debug TCP interface, parses NMEA/UBX detail and publishes
+       xbot_msgs/GnssDetail on ll/position/gnss_detail (consumed by
+       xbot_monitoring -> gnss/stream -> app GNSS page).
+
+       NOTE: the xCore debug port 10000 serves ONE client at a time (the firmware
+       accept()-loop is single-client). While this node is connected, `openmower
+       expose-gps` / u-center cannot use the port. To use u-center, set
+       OM_NO_GNSS_DETAIL=True (which disables this node) and restart comms, or
+       stop this node first. -->
+
+  <!-- xCore internal IP on the robot link (same target expose-gps tunnels to). -->
+  <arg name="firmware_ip" default="$(optenv OM_GNSS_FIRMWARE_IP 172.16.78.150)"/>
+  <arg name="firmware_port" default="10000"/>
+  <!-- Must match the receiver protocol configured for the GpsService (UBX/NMEA). -->
+  <arg name="protocol" default="$(optenv OM_GNSS_PROTOCOL UBX)"/>
+
+  <node pkg="gnss_detail_parser" type="gnss_detail_parser_node" name="gnss_detail_parser"
+        output="screen" respawn="true" respawn_delay="5"
+        unless="$(optenv OM_NO_GNSS_DETAIL False)">
+    <param name="firmware_ip" value="$(arg firmware_ip)"/>
+    <param name="firmware_port" value="$(arg firmware_port)"/>
+    <param name="protocol" value="$(arg protocol)"/>
+    <param name="send_config" value="true"/>
+  </node>
+</launch>

@@ -1,4 +1,4 @@
-exclude: '^(config/.+\.(sh|json)|web/.+||src/lib/.+)$'
+exclude: '^(config/.+\.(sh|json)|web/.+||src/lib/.+|src/gnss_detail_parser/src/minmea/.+)$'
 repos:
 -   repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v4.6.0

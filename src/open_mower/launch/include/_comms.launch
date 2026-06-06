@@ -33,6 +33,14 @@
             <node pkg="mower_comms_v2" type="mower_comms_v2" name="mower_comms_v2" output="screen" respawn="true" respawn_delay="10">
             </node>
         </group>
+        <!-- Off-board GNSS detail parser: reads the xCore raw GPS stream (TCP),
+             parses skyplot/RF/DOP detail and publishes ll/position/gnss_detail
+             for the app GNSS page. Disable with OM_NO_GNSS_DETAIL=True (e.g. to
+             free the debug port for `openmower expose-gps` / u-center). -->
+        <include if="$(eval optenv('OM_NO_GPS','False')=='False' and optenv('OM_NO_GNSS_DETAIL','False')=='False')"
+                 file="$(find gnss_detail_parser)/launch/gnss_detail_parser.launch">
+            <arg name="protocol" value="$(optenv OM_GNSS_PROTOCOL UBX)"/>
+        </include>
     </group>
     <group unless="$(optenv OM_NO_GPS False)">
     <!-- NTRIP for both: v1 and v2 -->
