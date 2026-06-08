@@ -29,6 +29,9 @@ class IdleBehavior : public Behavior {
   bool stay_docked = false;
   bool manual_start_mowing = false;
   bool start_area_recorder = false;
+  // Set by command_home() when the mower is idling out on the lawn (not docked)
+  // so execute() can transition into DockingBehavior on the next loop tick.
+  bool start_docking = false;
   std::vector<xbot_msgs::ActionInfo> actions;
 
  public:

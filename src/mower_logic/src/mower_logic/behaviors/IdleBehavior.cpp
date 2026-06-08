@@ -114,6 +114,14 @@ Behavior* IdleBehavior::execute() {
       return &AreaRecordingBehavior::INSTANCE;
     }
 
+    if (start_docking) {
+      // Return-home requested from idle-on-the-lawn. DockingBehavior's approach
+      // phase needs the positioning filter's GPS fusion, which this behavior
+      // disabled via setGPS(false) on entry — re-enable it before handing over.
+      setGPS(true);
+      return &DockingBehavior::INSTANCE;
+    }
+
     // This gets called if we need to refresh, e.g. on clearing maps
     if (aborted) {
       return &IdleBehavior::INSTANCE;
@@ -132,6 +140,7 @@ Behavior* IdleBehavior::execute() {
 
 void IdleBehavior::enter() {
   start_area_recorder = false;
+  start_docking = false;
   // Reset the docking behavior, to allow docking
   DockingBehavior::INSTANCE.reset();
 
@@ -163,7 +172,20 @@ bool IdleBehavior::mower_enabled() {
 }
 
 void IdleBehavior::command_home() {
-  // IdleBehavior == docked, don't do anything.
+  // DOCKED_INSTANCE / stay_docked == already at the dock, nothing to do.
+  if (stay_docked) {
+    return;
+  }
+  // Idling on the lawn (after Stop / abort_to_idle, after exiting area
+  // recording, or after a failed/aborted dock). Drive to the dock if one is
+  // configured; otherwise this is a safe no-op.
+  mower_map::GetDockingPointSrv get_docking_point_srv;
+  if (!dockingPointClient.call(get_docking_point_srv)) {
+    ROS_WARN("command_home: no docking point configured, ignoring return-home request.");
+    return;
+  }
+  ROS_INFO_STREAM("command_home: requesting docking from idle.");
+  start_docking = true;
 }
 
 void IdleBehavior::command_start() {

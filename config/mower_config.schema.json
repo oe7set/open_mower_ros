@@ -1112,6 +1112,15 @@
           "x-source": "ros",
           "x-ros-param": "/xbot_positioning/debug",
           "x-restart-required": "none"
+        },
+        "use_gps_heading": {
+          "type": "boolean",
+          "title": "Use GPS Heading for Fusion",
+          "description": "Include the GPS-derived heading (dual-antenna vehicle heading and velocity-derived motion heading) in the localization heading fusion. When off, heading relies on the IMU / wheel odometry only; GPS position is always fused regardless. Disabled by default.",
+          "default": false,
+          "x-source": "yaml-user",
+          "x-yaml-path": "xbot_positioning.use_gps_heading",
+          "x-restart-required": "service"
         }
       }
     },

@@ -68,6 +68,11 @@ xbot_positioning::KalmanState state_msg;
 xbot_msgs::AbsolutePose xb_absolute_pose_msg;
 
 bool gps_enabled = true;
+// When false, the GPS-derived heading (dual-antenna vehicle heading and
+// velocity-derived motion heading) is excluded from the orientation fusion;
+// GPS position fusion is unaffected. Defaults to false and is enabled via the
+// ~use_gps_heading parameter (set from the user config / launch).
+bool use_gps_heading = false;
 int gps_outlier_count = 0;
 int valid_gps_samples = 0;
 
@@ -306,12 +311,14 @@ void onPose(const xbot_msgs::AbsolutePose::ConstPtr &msg) {
                 dbg.y = m.vy();
                 dbg_expected_motion_vector.publish(dbg);
             }
-            if (std::sqrt(std::pow(msg->motion_vector.x, 2) + std::pow(msg->motion_vector.y, 2)) >= min_speed) {
-                core.updateOrientation2(msg->motion_vector.x, msg->motion_vector.y, 10000.0);
-            }
-            // Use direct vehicle heading from dual-antenna GPS (e.g. UM982) if available
-            if (msg->orientation_valid) {
-                core.updateOrientation(msg->vehicle_heading, 100.0);
+            if (use_gps_heading) {
+                if (std::sqrt(std::pow(msg->motion_vector.x, 2) + std::pow(msg->motion_vector.y, 2)) >= min_speed) {
+                    core.updateOrientation2(msg->motion_vector.x, msg->motion_vector.y, 10000.0);
+                }
+                // Use direct vehicle heading from dual-antenna GPS (e.g. UM982) if available
+                if (msg->orientation_valid) {
+                    core.updateOrientation(msg->vehicle_heading, 100.0);
+                }
             }
         }
     } else {
@@ -357,6 +364,7 @@ int main(int argc, char **argv) {
     paramNh.param("gyro_offset", gyro_offset, 0.0);
     paramNh.param("min_speed", min_speed, 0.01);
     paramNh.param("max_gps_accuracy", max_gps_accuracy, 0.1);
+    paramNh.param("use_gps_heading", use_gps_heading, false);
     paramNh.param("debug", publish_debug, false);
     paramNh.param("antenna_offset_x", antenna_offset_x, 0.0);
     paramNh.param("antenna_offset_y", antenna_offset_y, 0.0);
