@@ -30,7 +30,13 @@ void EmergencyServiceInterface::SendHighLevelEmergencyHelper(uint16_t add, uint1
 }
 
 void EmergencyServiceInterface::OnEmergencyReasonChanged(const uint16_t& new_value) {
-  latest_emergency_reason_ = new_value;
+  // Preserve a GUI-initiated high-level emergency: the low-level board reports
+  // reason 0 when no physical stop is active, which would otherwise clear the
+  // latch we set via SetHighLevelEmergency on the very next status tick. OR the
+  // tracked high-level reason back in; reset_emergency clears it by setting
+  // high_level_emergency_reason_ = 0, so this stays correct on reset. Physical
+  // low-level reasons (STOP/LIFT/COLLISION) arrive in new_value and are kept.
+  latest_emergency_reason_ = new_value | high_level_emergency_reason_;
   PublishEmergencyState();
 }
 
