@@ -6,10 +6,11 @@
        xbot_monitoring -> gnss/stream -> app GNSS page).
 
        NOTE: the xCore debug port 10000 serves ONE client at a time (the firmware
-       accept()-loop is single-client). While this node is connected, `openmower
-       expose-gps` / u-center cannot use the port. To use u-center, set
-       OM_NO_GNSS_DETAIL=True (which disables this node) and restart comms, or
-       stop this node first. -->
+       accept()-loop is single-client). `openmower expose-gps` performs an
+       automatic handoff: it calls /gnss_detail_parser/set_enabled (std_srvs/SetBool)
+       to pause this node (releasing the port) for the duration of the u-center
+       session, then re-enables it on exit. No manual steps needed. Set
+       OM_NO_GNSS_DETAIL=True only to disable this node permanently. -->
 
   <!-- xCore internal IP on the robot link (same target expose-gps tunnels to). -->
   <arg name="firmware_ip" default="$(optenv OM_GNSS_FIRMWARE_IP 172.16.78.150)"/>
@@ -27,5 +28,8 @@
     <param name="firmware_port" value="$(arg firmware_port)"/>
     <param name="protocol" value="$(arg protocol)"/>
     <param name="send_config" value="true"/>
+    <!-- Auto-resume if a paused state is never refreshed (crashed expose-gps).
+         0 disables the watchdog. -->
+    <param name="pause_watchdog_timeout" value="300"/>
   </node>
 </launch>

@@ -6,11 +6,12 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(catkin REQUIRED COMPONENTS
         roscpp
+        std_srvs
         xbot_msgs
 )
 
 catkin_package(
-        CATKIN_DEPENDS roscpp xbot_msgs
+        CATKIN_DEPENDS roscpp std_srvs xbot_msgs
 )
 
 include_directories(

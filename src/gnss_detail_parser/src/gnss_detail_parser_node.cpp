@@ -8,10 +8,12 @@
 // per-sentence transaction flood that previously hung the GPS thread.
 
 #include <ros/ros.h>
+#include <std_srvs/SetBool.h>
 #include <xbot_msgs/GnssDetail.h>
 #include <xbot_msgs/Satellite.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cerrno>
 #include <cstring>
@@ -40,6 +42,28 @@ ros::Publisher g_detail_pub;
 // Wall time of the last published epoch; zero = none yet. Used by the read loop
 // to warn when bytes flow but no epoch is framed (the classic protocol mismatch).
 ros::Time g_last_epoch_time(0);
+
+// Enabled = this parser owns the firmware's single-client debug port (10000).
+// `openmower expose-gps` calls ~set_enabled false to hand that port to u-center,
+// then ~set_enabled true to give it back. When false the read loop closes its
+// socket and stops reconnecting, releasing the port. Atomic because a future
+// AsyncSpinner could run the callback off the loop thread.
+std::atomic<bool> g_enabled{true};
+// Wall time of the last set_enabled request; drives the safety watchdog that
+// auto-resumes if a crashed expose-gps never re-enables us.
+ros::Time g_last_enable_change(0);
+
+// ~set_enabled service: pause (data=false) releases the single-client debug port
+// so `expose-gps` / u-center can use it; resume (data=true) reconnects.
+bool OnSetEnabled(std_srvs::SetBool::Request& req, std_srvs::SetBool::Response& res) {
+  g_enabled.store(req.data);
+  g_last_enable_change = ros::Time::now();
+  res.success = true;
+  res.message =
+      req.data ? "gnss_detail_parser enabled (will reconnect)" : "gnss_detail_parser paused (port 10000 released)";
+  ROS_INFO_STREAM("gnss_detail_parser: set_enabled -> " << (req.data ? "true" : "false"));
+  return true;
+}
 
 // Map our accumulated detail state to the ROS message and publish it.
 void PublishDetail(const GnssDetailState& s) {
@@ -159,11 +183,35 @@ int main(int argc, char** argv) {
   bool send_config = true;
   private_nh.param("send_config", send_config, true);
 
+  // Safety watchdog: if paused for longer than this many seconds without a fresh
+  // set_enabled request, auto-resume so a crashed/killed `expose-gps` cannot leave
+  // the app GNSS page dead forever. 0 disables the watchdog.
+  double resume_timeout = 0.0;
+  private_nh.param("pause_watchdog_timeout", resume_timeout, 300.0);
+
   g_detail_pub = n.advertise<xbot_msgs::GnssDetail>("ll/position/gnss_detail", 5);
+  ros::ServiceServer set_enabled_srv = private_nh.advertiseService("set_enabled", OnSetEnabled);
+  g_last_enable_change = ros::Time::now();
 
   ROS_INFO_STREAM("gnss_detail_parser: connecting to " << host << ":" << port_i << " protocol=" << protocol);
 
   while (ros::ok()) {
+    // Paused: hold no socket (releasing port 10000) and do not reconnect. Keep
+    // servicing callbacks so we can be re-enabled. The watchdog auto-resumes if
+    // the pause is never refreshed (crashed expose-gps).
+    if (!g_enabled.load()) {
+      if (resume_timeout > 0.0 && !g_last_enable_change.isZero() &&
+          (ros::Time::now() - g_last_enable_change).toSec() > resume_timeout) {
+        ROS_WARN("gnss_detail_parser: pause watchdog expired (%.0fs), auto-resuming", resume_timeout);
+        g_enabled.store(true);
+        g_last_enable_change = ros::Time::now();
+      } else {
+        ros::spinOnce();
+        ros::Duration(0.2).sleep();
+        continue;
+      }
+    }
+
     std::unique_ptr<Parser> parser;
     if (protocol == "NMEA") {
       parser = std::make_unique<gnss_detail_parser::NmeaParser>();
@@ -198,7 +246,11 @@ int main(int argc, char** argv) {
     constexpr int kMaxIdleReads = 6;
     int idle_reads = 0;
     std::vector<uint8_t> buf(2048);
-    while (ros::ok()) {
+    // g_enabled in the guard: when expose-gps pauses us, we drop out of the read
+    // loop and close(fd) below, releasing port 10000. Worst-case handoff latency
+    // is one SO_RCVTIMEO (5 s) — left as-is so the kMaxIdleReads (~30 s) heuristic
+    // above stays valid.
+    while (ros::ok() && g_enabled.load()) {
       ssize_t got = read(fd, buf.data(), buf.size());
       if (got > 0) {
         idle_reads = 0;
@@ -236,8 +288,10 @@ int main(int argc, char** argv) {
       ros::spinOnce();
     }
 
-    close(fd);
-    if (ros::ok()) ros::Duration(1.0).sleep();
+    close(fd);  // releases port 10000
+    // Only back off before reconnecting; if we were paused, the outer loop's
+    // paused branch handles the wait without this extra delay.
+    if (ros::ok() && g_enabled.load()) ros::Duration(1.0).sleep();
   }
 
   return 0;
