@@ -54,7 +54,12 @@
 
     <include file="$(find mower_scheduler)/launch/scheduler.launch"/>
     <include file="$(find mower_sessions_recorder)/launch/recorder.launch"/>
-    <include file="$(find mower_telemetry_recorder)/launch/recorder.launch"/>
+    <include file="$(find mower_telemetry_recorder)/launch/recorder.launch">
+        <!-- Localisation-debug mode: also record during manual drive / area
+             recording and capture the raw GPS + EKF fields. Enable together
+             with OM_POSITIONING_DEBUG=true (needed for the kalman_state topic). -->
+        <arg name="record_all_states" value="$(optenv OM_POSITIONING_DEBUG false)"/>
+    </include>
 
     <include file="$(find open_mower)/launch/include/_params.launch"/>
 </launch>

@@ -45,7 +45,8 @@ from typing import Any, Optional
 import rospy
 from mower_msgs.msg import HighLevelStatus
 from sensor_msgs.msg import Imu
-from xbot_msgs.msg import RobotState, SensorDataDouble
+from xbot_msgs.msg import AbsolutePose, RobotState, SensorDataDouble
+from xbot_positioning.msg import KalmanState
 from xbot_rpc.msg import RpcError, RpcRequest, RpcResponse
 from xbot_rpc.srv import RegisterMethodsSrv, RegisterMethodsSrvRequest
 
@@ -57,12 +58,22 @@ STATE_TOPIC = "xbot_monitoring/robot_state"
 HIGH_LEVEL_TOPIC = "mower_logic/current_state"
 IMU_TOPIC = "imu"
 SENSOR_DATA_TEMPLATE = "xbot_monitoring/sensors/{sid}/data"
+# Raw, unfiltered GPS pose (antenna position + GPS-derived headings) and the
+# raw EKF state. Only recorded when the localisation-debug mode is on; used to
+# diagnose antenna-offset / heading (theta) problems by correlating the raw
+# antenna fix against the fused centre estimate.
+RAW_GPS_TOPIC = "ll/position/gps"
+KALMAN_STATE_TOPIC = "xbot_positioning/kalman_state"
 
 NODE_ID = "mower_telemetry_recorder"
 RPC_METHODS = ("telemetry.list_sessions", "telemetry.get_session")
 
 # Active mowing-state names that gate sample recording.
 ACTIVE_STATES = {"MOWING", "PAUSED"}
+
+# Extra state names recorded only in localisation-debug mode (record_all_states),
+# so a diagnosis run can be captured while driving manually / recording an area.
+DEBUG_EXTRA_STATES = {"AREA_RECORDING", "IDLE"}
 
 # 4 Hz sampling — matches the App's heatmap zoom budget at sane file sizes
 # (a 30 min mow ≈ 7200 samples ≈ 2 MB JSONL).
@@ -204,9 +215,13 @@ class TelemetryRecorder:
     lock for index mutations.
     """
 
-    def __init__(self, store: TelemetryStore, sensor_ids: list[str]):
+    def __init__(self, store: TelemetryStore, sensor_ids: list[str], record_all_states: bool = False):
         self.store = store
         self.sensor_ids = sensor_ids
+        # In localisation-debug mode also record while driving manually / area
+        # recording, and fold the raw GPS + EKF debug fields into each sample.
+        self.record_all_states = record_all_states
+        self.active_states = ACTIVE_STATES | DEBUG_EXTRA_STATES if record_all_states else ACTIVE_STATES
         self._lock = threading.Lock()
         self._last_state: Optional[str] = None
 
@@ -228,6 +243,13 @@ class TelemetryRecorder:
         self._imu_accel: tuple[float, float, float] = (0.0, 0.0, 0.0)
         self._sensor_values: dict[str, float] = {}
 
+        # Localisation-debug caches (only populated/written in record_all_states
+        # mode). Raw GPS = the unfiltered antenna fix; Kalman = the fused EKF
+        # state. None until the first message arrives so missing topics stay out
+        # of the sample instead of writing misleading zeros.
+        self._raw_gps: Optional[AbsolutePose] = None
+        self._kalman: Optional[KalmanState] = None
+
         # Movement-gating bookkeeping: the pose/ts of the last sample actually
         # written, so a stationary mower (e.g. paused waiting for RTK fix) does
         # not pile up hundreds of near-identical points at one spot.
@@ -241,8 +263,8 @@ class TelemetryRecorder:
     def on_high_level(self, msg: HighLevelStatus) -> None:
         state_name = msg.state_name or ""
         with self._lock:
-            entered_active = state_name in ACTIVE_STATES and self._last_state not in ACTIVE_STATES
-            left_active = state_name not in ACTIVE_STATES and self._last_state in ACTIVE_STATES
+            entered_active = state_name in self.active_states and self._last_state not in self.active_states
+            left_active = state_name not in self.active_states and self._last_state in self.active_states
             self._last_state = state_name
 
             if entered_active and self._session_id is None:
@@ -283,6 +305,17 @@ class TelemetryRecorder:
     def on_sensor_data(self, sensor_id: str, msg: SensorDataDouble) -> None:
         with self._lock:
             self._sensor_values[sensor_id] = float(msg.data)
+
+    def on_raw_gps(self, msg: AbsolutePose) -> None:
+        # Raw, unfiltered antenna fix + GPS-derived headings (debug only).
+        with self._lock:
+            self._raw_gps = msg
+
+    def on_kalman_state(self, msg: KalmanState) -> None:
+        # Raw EKF state (x, y, theta, vx, vr); only published when
+        # xbot_positioning/debug is true (debug only).
+        with self._lock:
+            self._kalman = msg
 
     # ----- tick / IO -------------------------------------------------------
 
@@ -351,7 +384,41 @@ class TelemetryRecorder:
         sample["ax"], sample["ay"], sample["az"] = ax, ay, az
         for sid, val in self._sensor_values.items():
             sample[sid] = val
+        if self.record_all_states:
+            self._add_debug_fields_unlocked(sample)
         return sample
+
+    def _add_debug_fields_unlocked(self, sample: dict) -> None:
+        """Fold the raw GPS antenna fix and the fused EKF state into the sample
+        so an antenna-offset / heading (theta) bug can be diagnosed offline:
+        plotting the raw antenna track against the EKF centre, and the
+        correction vector (raw - ekf) in body frame, pins down whether the
+        offset or theta is wrong. Only called in localisation-debug mode."""
+        gps = self._raw_gps
+        if gps is not None:
+            # Raw antenna position in metres from the datum (map frame).
+            raw_x = float(gps.pose.pose.position.x)
+            raw_y = float(gps.pose.pose.position.y)
+            sample["raw_gps_x"] = raw_x
+            sample["raw_gps_y"] = raw_y
+            sample["gps_motion_heading"] = float(gps.motion_heading)
+            sample["gps_vehicle_heading"] = float(gps.vehicle_heading)
+            sample["gps_orientation_valid"] = bool(gps.orientation_valid)
+            sample["raw_gps_acc"] = float(gps.position_accuracy)
+            sample["raw_gps_flags"] = int(gps.flags)
+        kf = self._kalman
+        if kf is not None:
+            sample["ekf_x"] = float(kf.x)
+            sample["ekf_y"] = float(kf.y)
+            sample["ekf_theta"] = float(kf.theta)
+            sample["ekf_vx"] = float(kf.vx)
+            sample["ekf_vr"] = float(kf.vr)
+        # The antenna correction vector (raw antenna - fused centre). This is the
+        # core diagnostic signal: rotated into body frame via ekf_theta it must
+        # be the constant body-fixed offset; if it isn't, theta is the culprit.
+        if gps is not None and kf is not None:
+            sample["gps_dx"] = sample["raw_gps_x"] - sample["ekf_x"]
+            sample["gps_dy"] = sample["raw_gps_y"] - sample["ekf_y"]
 
     def _open_session(self) -> None:
         sid = secrets.token_hex(8)
@@ -573,9 +640,12 @@ def main() -> None:
     rospy.init_node(NODE_ID)
     telemetry_path = rospy.get_param("~telemetry_path", DEFAULT_PATH)
     sensor_ids: list[str] = rospy.get_param("~telemetry_sensor_ids", [])
+    # Localisation-debug mode: also record while driving manually / area
+    # recording, and capture the raw GPS + EKF fields for offline diagnosis.
+    record_all_states: bool = rospy.get_param("~record_all_states", False)
 
     store = TelemetryStore(telemetry_path)
-    recorder = TelemetryRecorder(store, sensor_ids)
+    recorder = TelemetryRecorder(store, sensor_ids, record_all_states=record_all_states)
     rpc_server = TelemetryRpcServer(store)
     # rpc_server's lifecycle is owned by main; reference kept so it isn't GC'd.
     _ = rpc_server
@@ -589,8 +659,12 @@ def main() -> None:
                          (lambda s: lambda msg: recorder.on_sensor_data(s, msg))(sid),
                          queue_size=10)
 
-    rospy.loginfo("mower_telemetry_recorder online, persisting to %s, sensors=%s",
-                  telemetry_path, sensor_ids)
+    if record_all_states:
+        rospy.Subscriber(RAW_GPS_TOPIC, AbsolutePose, recorder.on_raw_gps, queue_size=20)
+        rospy.Subscriber(KALMAN_STATE_TOPIC, KalmanState, recorder.on_kalman_state, queue_size=20)
+
+    rospy.loginfo("mower_telemetry_recorder online, persisting to %s, sensors=%s, record_all_states=%s",
+                  telemetry_path, sensor_ids, record_all_states)
 
     rate = rospy.Rate(SAMPLE_HZ)
     while not rospy.is_shutdown():

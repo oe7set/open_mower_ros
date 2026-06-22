@@ -19,6 +19,7 @@
   <build_depend>mower_msgs</build_depend>
   <build_depend>xbot_msgs</build_depend>
   <build_depend>xbot_rpc</build_depend>
+  <build_depend>xbot_positioning</build_depend>
 
   <exec_depend>rospy</exec_depend>
   <exec_depend>std_msgs</exec_depend>
@@ -26,6 +27,7 @@
   <exec_depend>mower_msgs</exec_depend>
   <exec_depend>xbot_msgs</exec_depend>
   <exec_depend>xbot_rpc</exec_depend>
+  <exec_depend>xbot_positioning</exec_depend>
 
   <export/>
 </package>

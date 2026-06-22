@@ -17,9 +17,18 @@
     om_v_battery
   ]"/>
 
+  <!-- Localisation-debug mode. When true, the recorder also records while
+       driving manually / recording an area (states AREA_RECORDING, IDLE) and
+       folds the raw GPS antenna fix + EKF state (raw_gps_x/y, ekf_x/y/theta,
+       gps_*_heading, gps_dx/dy) into every sample for offline antenna-offset /
+       heading diagnosis. Needs xbot_positioning/debug=true for the kalman_state
+       topic. Keep false in normal operation. -->
+  <arg name="record_all_states" default="false"/>
+
   <node pkg="mower_telemetry_recorder" type="recorder.py" name="mower_telemetry_recorder"
         output="screen" respawn="true" respawn_delay="10">
     <param name="telemetry_path" value="$(arg telemetry_path)"/>
     <rosparam param="telemetry_sensor_ids" subst_value="True">$(arg telemetry_sensor_ids)</rosparam>
+    <param name="record_all_states" value="$(arg record_all_states)"/>
   </node>
 </launch>
