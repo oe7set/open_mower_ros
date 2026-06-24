@@ -28,7 +28,7 @@
   <depend>grid_map_core</depend>
   <depend>grid_map_ros</depend>
   <depend>grid_map_msgs</depend>
-  <depend>xbot_rpc</depend>
+  <depend>xbot_mqtt</depend>
   <depend>roslib</depend>
   <depend>dynamic_reconfigure</depend>
   <depend>rosgraph_msgs</depend>

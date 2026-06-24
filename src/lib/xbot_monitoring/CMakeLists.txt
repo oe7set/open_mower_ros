@@ -19,7 +19,7 @@ find_package(catkin REQUIRED COMPONENTS
         grid_map_ros
         grid_map_msgs
         rosgraph_msgs
-        xbot_rpc
+        xbot_mqtt
         dynamic_reconfigure
         )
 

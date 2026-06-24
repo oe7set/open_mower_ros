@@ -47,8 +47,8 @@ from mower_msgs.msg import HighLevelStatus
 from sensor_msgs.msg import Imu
 from xbot_msgs.msg import AbsolutePose, RobotState, SensorDataDouble
 from xbot_positioning.msg import KalmanState
-from xbot_rpc.msg import RpcError, RpcRequest, RpcResponse
-from xbot_rpc.srv import RegisterMethodsSrv, RegisterMethodsSrvRequest
+from xbot_mqtt.msg import RpcError, RpcRequest, RpcResponse
+from xbot_mqtt.srv import RegisterMethodsSrv, RegisterMethodsSrvRequest
 
 # Default mirrors the OpenMowerOS volume mount; container fallback is the
 # same. recorder.launch can override.
@@ -480,7 +480,7 @@ class TelemetryRpcServer:
     """Implements telemetry.list_sessions and telemetry.get_session.
 
     Same shape as mower_scheduler/scheduler.py: register methods with the
-    central xbot_rpc dispatcher, listen on /xbot/rpc/request, publish the
+    central xbot_mqtt dispatcher, listen on /xbot/rpc/request, publish the
     result on /xbot/rpc/response (or an error on /xbot/rpc/error).
     """
 

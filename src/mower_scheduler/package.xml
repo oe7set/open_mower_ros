@@ -15,12 +15,12 @@
 
   <build_depend>std_msgs</build_depend>
   <build_depend>xbot_msgs</build_depend>
-  <build_depend>xbot_rpc</build_depend>
+  <build_depend>xbot_mqtt</build_depend>
 
   <exec_depend>rospy</exec_depend>
   <exec_depend>std_msgs</exec_depend>
   <exec_depend>xbot_msgs</exec_depend>
-  <exec_depend>xbot_rpc</exec_depend>
+  <exec_depend>xbot_mqtt</exec_depend>
   <exec_depend>python3-dateutil</exec_depend>
   <exec_depend>dynamic_reconfigure</exec_depend>
   <!-- NOTE: the `holidays` Python package (optional, for public-holiday

@@ -34,8 +34,8 @@ xbot_positioning:
   debug: false
 
 ntrip_client:
-  reconnect_attempt_max: 5
-  reconnect_attempt_wait_seconds: 99999
+  reconnect_attempt_max: 99999
+  reconnect_attempt_wait_seconds: 5
 
 mower_logic:
   automatic_mode: 0
@@ -63,3 +63,9 @@ mower_logic:
 
 xbot_monitoring:
   external_mqtt_enable: false
+
+
+# Openmower doesn't work in m/s but duty cycle by default, so we must adjust the speed for the recovery behavior
+move_base_flex:
+  BackwardForwardRecovery:
+    linear_vel: 0.6

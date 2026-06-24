@@ -56,12 +56,12 @@
 #include "mower_msgs/HighLevelControlSrv.h"
 #include "mower_msgs/Bms.h"
 #include "mower_msgs/Power.h"
-#include "xbot_rpc/RpcError.h"
-#include "xbot_rpc/RpcRequest.h"
-#include "xbot_rpc/RpcResponse.h"
-#include "xbot_rpc/constants.h"
-#include "xbot_rpc/provider.h"
-#include "xbot_rpc/RegisterMethodsSrv.h"
+#include "xbot_mqtt/RpcError.h"
+#include "xbot_mqtt/RpcRequest.h"
+#include "xbot_mqtt/RpcResponse.h"
+#include "xbot_mqtt/constants.h"
+#include "xbot_mqtt/provider.h"
+#include "xbot_mqtt/RegisterMethodsSrv.h"
 #include "capabilities.h"
 
 using json = nlohmann::ordered_json;
@@ -854,7 +854,7 @@ struct ImuCalibrationCollector {
 };
 ImuCalibrationCollector imu_calibration_collector;
 
-xbot_rpc::RpcProvider rpc_provider("xbot_monitoring", {{
+xbot_mqtt::RpcProvider rpc_provider("xbot_monitoring", {{
     RPC_METHOD("rpc.ping", {
         return "pong";
     }),
@@ -878,7 +878,7 @@ xbot_rpc::RpcProvider rpc_provider("xbot_monitoring", {{
         try {
             return load_schema_cached().dump();
         } catch (const std::exception& e) {
-            throw xbot_rpc::RpcException(xbot_rpc::RpcError::ERROR_INTERNAL,
+            throw xbot_mqtt::RpcException(xbot_mqtt::RpcError::ERROR_INTERNAL,
                                           std::string("Failed to load schema: ") + e.what());
         }
     }),
@@ -888,7 +888,7 @@ xbot_rpc::RpcProvider rpc_provider("xbot_monitoring", {{
         try {
             return xbot_monitoring::config_io::defaults_yaml_from_schema(load_schema_cached());
         } catch (const std::exception& e) {
-            throw xbot_rpc::RpcException(xbot_rpc::RpcError::ERROR_INTERNAL,
+            throw xbot_mqtt::RpcException(xbot_mqtt::RpcError::ERROR_INTERNAL,
                                           std::string("Failed to build defaults: ") + e.what());
         }
     }),
@@ -959,7 +959,7 @@ xbot_rpc::RpcProvider rpc_provider("xbot_monitoring", {{
             }
             return out;
         } catch (const std::exception& e) {
-            throw xbot_rpc::RpcException(xbot_rpc::RpcError::ERROR_INTERNAL,
+            throw xbot_mqtt::RpcException(xbot_mqtt::RpcError::ERROR_INTERNAL,
                                           std::string("Failed to read config: ") + e.what());
         }
     }),
@@ -973,7 +973,7 @@ xbot_rpc::RpcProvider rpc_provider("xbot_monitoring", {{
         } else if (params.is_object()) {
             changes = params;
         } else {
-            throw xbot_rpc::RpcException(xbot_rpc::RpcError::ERROR_INVALID_PARAMS,
+            throw xbot_mqtt::RpcException(xbot_mqtt::RpcError::ERROR_INVALID_PARAMS,
                                           "Expected an object of {key: value} changes");
         }
         try {
@@ -1129,7 +1129,7 @@ xbot_rpc::RpcProvider rpc_provider("xbot_monitoring", {{
                                  {"updated_keys", updated_keys},
                                  {"skipped_keys", skipped_keys}});
         } catch (const std::exception& e) {
-            throw xbot_rpc::RpcException(xbot_rpc::RpcError::ERROR_INTERNAL,
+            throw xbot_mqtt::RpcException(xbot_mqtt::RpcError::ERROR_INTERNAL,
                                           std::string("Failed to write config: ") + e.what());
         }
     }),
@@ -1139,10 +1139,10 @@ xbot_rpc::RpcProvider rpc_provider("xbot_monitoring", {{
         // <node>/<key> and that node exposes /set_parameters. Unknown
         // composites silently fall back to a static set.
         if (!params.is_object() || !params.contains("name") || !params["name"].is_string()) {
-            throw xbot_rpc::RpcException(xbot_rpc::RpcError::ERROR_INVALID_PARAMS, "Missing name");
+            throw xbot_mqtt::RpcException(xbot_mqtt::RpcError::ERROR_INVALID_PARAMS, "Missing name");
         }
         if (!params.contains("value")) {
-            throw xbot_rpc::RpcException(xbot_rpc::RpcError::ERROR_INVALID_PARAMS, "Missing value");
+            throw xbot_mqtt::RpcException(xbot_mqtt::RpcError::ERROR_INVALID_PARAMS, "Missing value");
         }
         const std::string name = params["name"];
         const auto& v = params["value"];
@@ -1150,7 +1150,7 @@ xbot_rpc::RpcProvider rpc_provider("xbot_monitoring", {{
         else if (v.is_number_integer()) ros::param::set(name, v.get<int>());
         else if (v.is_number_float()) ros::param::set(name, v.get<double>());
         else if (v.is_string()) ros::param::set(name, v.get<std::string>());
-        else throw xbot_rpc::RpcException(xbot_rpc::RpcError::ERROR_INVALID_PARAMS, "Unsupported value type");
+        else throw xbot_mqtt::RpcException(xbot_mqtt::RpcError::ERROR_INVALID_PARAMS, "Unsupported value type");
 
         // Best-effort dynamic_reconfigure. Owner node is derived from the
         // first path segment (e.g. /mower_logic/foo → /mower_logic). If the
@@ -1193,7 +1193,7 @@ xbot_rpc::RpcProvider rpc_provider("xbot_monitoring", {{
         // dropped. The frontend uses this to populate the live values for
         // the Motion Control / Localization / Navigation advanced sections.
         if (!params.is_object() || !params.contains("names") || !params["names"].is_array()) {
-            throw xbot_rpc::RpcException(xbot_rpc::RpcError::ERROR_INVALID_PARAMS,
+            throw xbot_mqtt::RpcException(xbot_mqtt::RpcError::ERROR_INVALID_PARAMS,
                                           "Missing names array");
         }
         const auto& leaves = load_leaf_index_cached();
@@ -1261,7 +1261,7 @@ xbot_rpc::RpcProvider rpc_provider("xbot_monitoring", {{
             }
         }
         if (kLogsTailSources.find(source) == kLogsTailSources.end()) {
-            throw xbot_rpc::RpcException(xbot_rpc::RpcError::ERROR_INVALID_PARAMS,
+            throw xbot_mqtt::RpcException(xbot_mqtt::RpcError::ERROR_INVALID_PARAMS,
                                           "Unknown source; allowed: all, mower_logic, "
                                           "xbot_monitoring, mower_scheduler, "
                                           "move_base_flex, map_service, slic3r_coverage_planner");
@@ -1303,7 +1303,7 @@ xbot_rpc::RpcProvider rpc_provider("xbot_monitoring", {{
             service = params["service"].get<std::string>();
         }
         if (kRestartServices.find(service) == kRestartServices.end()) {
-            throw xbot_rpc::RpcException(xbot_rpc::RpcError::ERROR_INVALID_PARAMS,
+            throw xbot_mqtt::RpcException(xbot_mqtt::RpcError::ERROR_INVALID_PARAMS,
                                           "Unknown service; allowed: openmower, "
                                           "mower_logic, xbot_monitoring, move_base_flex");
         }
@@ -1325,7 +1325,7 @@ xbot_rpc::RpcProvider rpc_provider("xbot_monitoring", {{
         // into the host PID namespace and call /sbin/reboot. Without it the
         // call is rejected up-front rather than silently no-oping.
         if (!host_namespace_available()) {
-            throw xbot_rpc::RpcException(xbot_rpc::RpcError::ERROR_INTERNAL,
+            throw xbot_mqtt::RpcException(xbot_mqtt::RpcError::ERROR_INTERNAL,
                                           "Host namespace not available — compose stack needs `pid: host`");
         }
         int delay_s = 1;
@@ -1412,7 +1412,7 @@ xbot_rpc::RpcProvider rpc_provider("xbot_monitoring", {{
                 else if (s == "warning") filter.severity_min = xbot_msgs::Event::SEVERITY_WARNING;
                 else if (s == "error") filter.severity_min = xbot_msgs::Event::SEVERITY_ERROR;
                 else if (s == "critical") filter.severity_min = xbot_msgs::Event::SEVERITY_CRITICAL;
-                else throw xbot_rpc::RpcException(xbot_rpc::RpcError::ERROR_INVALID_PARAMS,
+                else throw xbot_mqtt::RpcException(xbot_mqtt::RpcError::ERROR_INVALID_PARAMS,
                                                   "severity_min must be info|warning|error|critical");
             }
             if (params.contains("types") && params["types"].is_array()) {
@@ -1431,7 +1431,7 @@ xbot_rpc::RpcProvider rpc_provider("xbot_monitoring", {{
         // Params: { id: string }. Marks the matching event as acked. Unknown
         // ids are not an error — the result simply reports ok=false.
         if (!params.is_object() || !params.contains("id") || !params["id"].is_string()) {
-            throw xbot_rpc::RpcException(xbot_rpc::RpcError::ERROR_INVALID_PARAMS,
+            throw xbot_mqtt::RpcException(xbot_mqtt::RpcError::ERROR_INVALID_PARAMS,
                                           "id (string) is required");
         }
         bool ok = event_store.ack(params["id"].get<std::string>());
@@ -1461,7 +1461,7 @@ xbot_rpc::RpcProvider rpc_provider("xbot_monitoring", {{
         // Returns: { sensor_id, samples: [{ts_ms, value}, ...] } oldest→newest
         if (!params.is_object() || !params.contains("sensor_id") ||
             !params["sensor_id"].is_string()) {
-            throw xbot_rpc::RpcException(xbot_rpc::RpcError::ERROR_INVALID_PARAMS,
+            throw xbot_mqtt::RpcException(xbot_mqtt::RpcError::ERROR_INVALID_PARAMS,
                                           "sensor_id (string) is required");
         }
         std::optional<uint64_t> since_ts;
@@ -1540,8 +1540,8 @@ xbot_rpc::RpcProvider rpc_provider("xbot_monitoring", {{
 
         if (samples.size() < kTargetSamples / 2) {
             // Less than ~1 s of data — the raw IMU topic is probably down.
-            throw xbot_rpc::RpcException(
-                xbot_rpc::RpcError::ERROR_INTERNAL,
+            throw xbot_mqtt::RpcException(
+                xbot_mqtt::RpcError::ERROR_INTERNAL,
                 std::string("Only ") + std::to_string(samples.size()) +
                     " IMU samples received in " + std::to_string(kMaxWait.count()) +
                     "s — is ll/imu/data_raw publishing?");
@@ -1581,8 +1581,8 @@ xbot_rpc::RpcProvider rpc_provider("xbot_monitoring", {{
             err_data["accel_threshold"] = kAccelStddevThreshold;
             err_data["gyro_threshold"] = kGyroStddevThreshold;
             err_data["samples_count"] = samples.size();
-            throw xbot_rpc::RpcException(
-                xbot_rpc::RpcError::ERROR_INTERNAL,
+            throw xbot_mqtt::RpcException(
+                xbot_mqtt::RpcError::ERROR_INTERNAL,
                 std::string("MOWER_NOT_STILL: accel_stddev_max=") +
                     std::to_string(accel_max) + " rad/s^2, gyro_stddev_max=" +
                     std::to_string(gyro_max) + " rad/s — " + err_data.dump());
@@ -1665,7 +1665,7 @@ xbot_rpc::RpcProvider rpc_provider("xbot_monitoring", {{
             apply_to_ros_param("ll.services.imu.gyro_bias.y", gyro_bias_y);
             apply_to_ros_param("ll.services.imu.gyro_bias.z", gyro_bias_z);
         } catch (const std::exception& e) {
-            throw xbot_rpc::RpcException(xbot_rpc::RpcError::ERROR_INTERNAL,
+            throw xbot_mqtt::RpcException(xbot_mqtt::RpcError::ERROR_INTERNAL,
                                           std::string("Failed to persist IMU calibration: ") + e.what());
         }
 
@@ -1701,13 +1701,13 @@ xbot_rpc::RpcProvider rpc_provider("xbot_monitoring", {{
                 "mower_service/high_level_control");
         }
         if (!client.waitForExistence(ros::Duration(1.0))) {
-            throw xbot_rpc::RpcException(xbot_rpc::RpcError::ERROR_INTERNAL,
+            throw xbot_mqtt::RpcException(xbot_mqtt::RpcError::ERROR_INTERNAL,
                                           "mower_service/high_level_control not available");
         }
         mower_msgs::HighLevelControlSrv srv;
         srv.request.command = mower_msgs::HighLevelControlSrv::Request::COMMAND_HOME;
         if (!client.call(srv)) {
-            throw xbot_rpc::RpcException(xbot_rpc::RpcError::ERROR_INTERNAL,
+            throw xbot_mqtt::RpcException(xbot_mqtt::RpcError::ERROR_INTERNAL,
                                           "Failed to call mower_service/high_level_control");
         }
         return json::object({{"ok", true}});
@@ -1718,18 +1718,18 @@ xbot_rpc::RpcProvider rpc_provider("xbot_monitoring", {{
         // user-supplied arguments — there is no path to inject other docker
         // subcommands here.
         if (!host_namespace_available()) {
-            throw xbot_rpc::RpcException(xbot_rpc::RpcError::ERROR_INTERNAL,
+            throw xbot_mqtt::RpcException(xbot_mqtt::RpcError::ERROR_INTERNAL,
                                           "Host namespace not available — compose stack needs `pid: host`");
         }
         ROS_WARN_STREAM("system.docker_prune requested — running `docker image prune -af` on host");
         ShellResult shell = run_with_timeout("sudo -n nsenter -t 1 -a docker image prune -af",
                                               std::chrono::seconds(60));
         if (shell.exit_code == -1) {
-            throw xbot_rpc::RpcException(xbot_rpc::RpcError::ERROR_INTERNAL,
+            throw xbot_mqtt::RpcException(xbot_mqtt::RpcError::ERROR_INTERNAL,
                                           "docker image prune timed out or failed to spawn");
         }
         if (shell.exit_code != 0) {
-            throw xbot_rpc::RpcException(xbot_rpc::RpcError::ERROR_INTERNAL,
+            throw xbot_mqtt::RpcException(xbot_mqtt::RpcError::ERROR_INTERNAL,
                                           std::string("docker image prune failed: ") + shell.output);
         }
         // Parse "Total reclaimed space: 1.234GB" out of the output. Sizes are
@@ -1877,6 +1877,14 @@ void publish_version() {
         }
     }
     try_publish("version/json", version.dump(), true);
+    if(external_mqtt_enable) {
+        try {
+            client_external_->publish(external_mqtt_topic_prefix + "version", version.dump(), 1, true);
+            
+        } catch (const mqtt::exception &e) {
+            // client disconnected or something, we drop it.
+        }
+    }
     auto bson = json::to_bson(version);
     try_publish_binary("version", bson.data(), bson.size(), true);
 }
@@ -2496,20 +2504,20 @@ void rpc_request_callback(const std::string &payload) {
     try {
       req = json::parse(payload);
     } catch (const json::parse_error &e) {
-      return rpc_publish_error(xbot_rpc::RpcError::ERROR_INVALID_JSON, "Could not parse request JSON");
+      return rpc_publish_error(xbot_mqtt::RpcError::ERROR_INVALID_JSON, "Could not parse request JSON");
     }
 
     // Validate
     if (!req.is_object()) {
-        return rpc_publish_error(xbot_rpc::RpcError::ERROR_INVALID_REQUEST, "Request is not a JSON object");
+        return rpc_publish_error(xbot_mqtt::RpcError::ERROR_INVALID_REQUEST, "Request is not a JSON object");
     }
     json id = req.contains("id") ? req["id"] : nullptr;
     if (id != nullptr && !id.is_string()) {
-        return rpc_publish_error(xbot_rpc::RpcError::ERROR_INVALID_REQUEST, "ID is not a string", id);
+        return rpc_publish_error(xbot_mqtt::RpcError::ERROR_INVALID_REQUEST, "ID is not a string", id);
     } else if (!req.contains("jsonrpc") || !req["jsonrpc"].is_string() || req["jsonrpc"] != "2.0") {
-        return rpc_publish_error(xbot_rpc::RpcError::ERROR_INVALID_REQUEST, "Invalid JSON-RPC version");
+        return rpc_publish_error(xbot_mqtt::RpcError::ERROR_INVALID_REQUEST, "Invalid JSON-RPC version");
     } else if (!req.contains("method") || !req["method"].is_string()) {
-        return rpc_publish_error(xbot_rpc::RpcError::ERROR_INVALID_REQUEST, "Method is not a string", req["id"]);
+        return rpc_publish_error(xbot_mqtt::RpcError::ERROR_INVALID_REQUEST, "Method is not a string", req["id"]);
     }
 
     // Check if the method is registered
@@ -2525,23 +2533,23 @@ void rpc_request_callback(const std::string &payload) {
         }
     }
     if (!is_registered) {
-        return rpc_publish_error(xbot_rpc::RpcError::ERROR_METHOD_NOT_FOUND, "Method \"" + method + "\" not found", req["id"]);
+        return rpc_publish_error(xbot_mqtt::RpcError::ERROR_METHOD_NOT_FOUND, "Method \"" + method + "\" not found", req["id"]);
     }
 
     // Forward to the providers as ROS message
-    xbot_rpc::RpcRequest msg;
+    xbot_mqtt::RpcRequest msg;
     msg.method = method;
     msg.params = req.contains("params") ? req["params"].dump() : "";
     msg.id = id != nullptr ? id : "";
     rpc_request_pub.publish(msg);
 }
 
-void rpc_response_callback(const xbot_rpc::RpcResponse::ConstPtr &msg) {
+void rpc_response_callback(const xbot_mqtt::RpcResponse::ConstPtr &msg) {
     json result;
     try {
         result = json::parse(msg->result);
     } catch (const json::parse_error &e) {
-        return rpc_publish_error(xbot_rpc::RpcError::ERROR_INTERNAL, "Internal error while parsing result JSON: " + std::string(e.what()), msg->id);
+        return rpc_publish_error(xbot_mqtt::RpcError::ERROR_INTERNAL, "Internal error while parsing result JSON: " + std::string(e.what()), msg->id);
     }
 
     json j = {{"jsonrpc", "2.0"}, {"result", result}, {"id", msg->id}};
@@ -2552,11 +2560,11 @@ void rpc_response_callback(const xbot_rpc::RpcResponse::ConstPtr &msg) {
     try_publish("rpc/response", j.dump());
 }
 
-void rpc_error_callback(const xbot_rpc::RpcError::ConstPtr &msg) {
+void rpc_error_callback(const xbot_mqtt::RpcError::ConstPtr &msg) {
     rpc_publish_error(msg->code, msg->message, msg->id);
 }
 
-bool register_methods(xbot_rpc::RegisterMethodsSrvRequest &req, xbot_rpc::RegisterMethodsSrvResponse &res) {
+bool register_methods(xbot_mqtt::RegisterMethodsSrvRequest &req, xbot_mqtt::RegisterMethodsSrvResponse &res) {
     std::lock_guard<std::mutex> lk(registered_methods_mutex);
     registered_methods[req.node_id] = req.methods;
     ROS_INFO_STREAM("new methods registered: " << req.node_id << " registered " << req.methods.size() << " methods.");
@@ -2665,10 +2673,10 @@ int main(int argc, char **argv) {
     cmd_vel_pub = n->advertise<geometry_msgs::Twist>("xbot_monitoring/remote_cmd_vel", 1);
     action_pub = n->advertise<std_msgs::String>("xbot/action", 1);
 
-    rpc_request_pub = n->advertise<xbot_rpc::RpcRequest>(xbot_rpc::TOPIC_REQUEST, 100);
-    ros::Subscriber rpc_response_sub = n->subscribe(xbot_rpc::TOPIC_RESPONSE, 100, rpc_response_callback);
-    ros::Subscriber rpc_error_sub = n->subscribe(xbot_rpc::TOPIC_ERROR, 100, rpc_error_callback);
-    ros::ServiceServer register_methods_service = n->advertiseService(xbot_rpc::SERVICE_REGISTER_METHODS, register_methods);
+    rpc_request_pub = n->advertise<xbot_mqtt::RpcRequest>(xbot_mqtt::TOPIC_REQUEST, 100);
+    ros::Subscriber rpc_response_sub = n->subscribe(xbot_mqtt::TOPIC_RESPONSE, 100, rpc_response_callback);
+    ros::Subscriber rpc_error_sub = n->subscribe(xbot_mqtt::TOPIC_ERROR, 100, rpc_error_callback);
+    ros::ServiceServer register_methods_service = n->advertiseService(xbot_mqtt::SERVICE_REGISTER_METHODS, register_methods);
 
     ros::AsyncSpinner spinner(1);
     spinner.start();

@@ -7,7 +7,7 @@ find_package(catkin REQUIRED COMPONENTS
   sensor_msgs
   mower_msgs
   xbot_msgs
-  xbot_rpc
+  xbot_mqtt
 )
 
 catkin_package()

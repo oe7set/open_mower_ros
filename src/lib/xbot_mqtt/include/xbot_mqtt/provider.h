@@ -1,10 +1,10 @@
 #pragma once
 
 #include <ros/ros.h>
-#include <xbot_rpc/RpcError.h>
-#include <xbot_rpc/RpcRequest.h>
-#include <xbot_rpc/RpcResponse.h>
-#include <xbot_rpc/constants.h>
+#include <xbot_mqtt/RpcError.h>
+#include <xbot_mqtt/RpcRequest.h>
+#include <xbot_mqtt/RpcResponse.h>
+#include <xbot_mqtt/constants.h>
 
 #include <nlohmann/json.hpp>
 
@@ -14,7 +14,7 @@
 #define RPC_METHOD(id, ...) \
   { id, [](const std::string& method, const nlohmann::basic_json<>& params) __VA_ARGS__ }
 
-namespace xbot_rpc {
+namespace xbot_mqtt {
 
 typedef std::function<nlohmann::basic_json<>(const std::string& method, const nlohmann::basic_json<>& params)> callback_t;
 
@@ -42,9 +42,9 @@ class RpcProvider {
   ros::Publisher error_pub;
   ros::ServiceClient registration_client;
 
-  void handleRequest(const xbot_rpc::RpcRequest::ConstPtr& request);
-  void publishResponse(const xbot_rpc::RpcRequest::ConstPtr& request, const nlohmann::basic_json<>& response);
-  void publishError(const xbot_rpc::RpcRequest::ConstPtr& request, int16_t code, const std::string& message);
+  void handleRequest(const xbot_mqtt::RpcRequest::ConstPtr& request);
+  void publishResponse(const xbot_mqtt::RpcRequest::ConstPtr& request, const nlohmann::basic_json<>& response);
+  void publishError(const xbot_mqtt::RpcRequest::ConstPtr& request, int16_t code, const std::string& message);
 
  public:
   RpcProvider(const std::string& node_id, const std::map<std::string, callback_t>& methods = {}) : node_id(node_id), methods(methods) {}
@@ -62,4 +62,4 @@ class RpcProvider {
   void publishMethods();
 };
 
-}  // namespace xbot_rpc
+}  // namespace xbot_mqtt

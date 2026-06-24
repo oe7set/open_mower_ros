@@ -52,8 +52,8 @@ from dynamic_reconfigure.msg import IntParameter, Config as ReconfigureConfig
 from dynamic_reconfigure.srv import Reconfigure, ReconfigureRequest
 from std_msgs.msg import String
 from xbot_msgs.msg import Event, RobotState
-from xbot_rpc.msg import RpcError, RpcRequest, RpcResponse
-from xbot_rpc.srv import RegisterMethodsSrv, RegisterMethodsSrvRequest
+from xbot_mqtt.msg import RpcError, RpcRequest, RpcResponse
+from xbot_mqtt.srv import RegisterMethodsSrv, RegisterMethodsSrvRequest
 
 from mower_scheduler import event_publisher
 
@@ -70,7 +70,7 @@ def _resolve_zone(name: str):
         return None
     return gettz(name)
 
-# JSON-RPC error codes mirror xbot_rpc/RpcError.msg constants. We avoid pulling
+# JSON-RPC error codes mirror xbot_mqtt/RpcError.msg constants. We avoid pulling
 # them off the message class because that requires generated bindings.
 ERROR_INVALID_PARAMS = -32602
 ERROR_INTERNAL = -32603

@@ -57,7 +57,7 @@ using json = nlohmann::ordered_json;
 #include "xbot_msgs/MapSize.h"
 
 // RPC
-#include "xbot_rpc/provider.h"
+#include "xbot_mqtt/provider.h"
 
 const std::string MAP_FILE = "map.json";
 const std::string LEGACY_MAP_FILE = "map.bag";
@@ -223,11 +223,12 @@ ros::ServiceClient slic3r_preview_client;
 geometry_msgs::Polygon jsonToPolygon(const nlohmann::basic_json<>& points) {
   geometry_msgs::Polygon poly;
   if (!points.is_array()) {
-    throw xbot_rpc::RpcException(xbot_rpc::RpcError::ERROR_INVALID_PARAMS, "Polygon must be an array of [x, y] points");
+    throw xbot_mqtt::RpcException(xbot_mqtt::RpcError::ERROR_INVALID_PARAMS,
+                                  "Polygon must be an array of [x, y] points");
   }
   for (const auto& pt : points) {
     if (!pt.is_array() || pt.size() < 2) {
-      throw xbot_rpc::RpcException(xbot_rpc::RpcError::ERROR_INVALID_PARAMS, "Each polygon point must be [x, y]");
+      throw xbot_mqtt::RpcException(xbot_mqtt::RpcError::ERROR_INVALID_PARAMS, "Each polygon point must be [x, y]");
     }
     geometry_msgs::Point32 p;
     p.x = pt[0].get<double>();
@@ -239,15 +240,15 @@ geometry_msgs::Polygon jsonToPolygon(const nlohmann::basic_json<>& points) {
 }
 
 // clang-format off
-xbot_rpc::RpcProvider rpc_provider("mower_map_service", {{
+xbot_mqtt::RpcProvider rpc_provider("mower_map_service", {{
   RPC_METHOD("map.replace", {
     if (!params.is_array() || params.size() != 1) {
-      throw xbot_rpc::RpcException(xbot_rpc::RpcError::ERROR_INVALID_PARAMS, "Missing map parameter");
+      throw xbot_mqtt::RpcException(xbot_mqtt::RpcError::ERROR_INVALID_PARAMS, "Missing map parameter");
     }
     try {
       map_data = params[0];
     } catch (const std::exception& e) {
-      throw xbot_rpc::RpcException(xbot_rpc::RpcError::ERROR_INVALID_PARAMS, "Invalid map: " + std::string(e.what()));
+      throw xbot_mqtt::RpcException(xbot_mqtt::RpcError::ERROR_INVALID_PARAMS, "Invalid map: " + std::string(e.what()));
     }
     saveMapToFile();
     ROS_INFO_STREAM("Loaded " << map_data.areas.size() << " areas via RPC and saved to file");
@@ -265,11 +266,11 @@ xbot_rpc::RpcProvider rpc_provider("mower_map_service", {{
     } else if (params.is_array() && !params.empty()) {
       idx = params[0];
     } else {
-      throw xbot_rpc::RpcException(xbot_rpc::RpcError::ERROR_INVALID_PARAMS, "Missing area_index");
+      throw xbot_mqtt::RpcException(xbot_mqtt::RpcError::ERROR_INVALID_PARAMS, "Missing area_index");
     }
     const auto mow_areas = map_data.getMowingAreas();
     if (idx < 0 || idx >= static_cast<int>(mow_areas.size())) {
-      throw xbot_rpc::RpcException(xbot_rpc::RpcError::ERROR_INVALID_PARAMS,
+      throw xbot_mqtt::RpcException(xbot_mqtt::RpcError::ERROR_INVALID_PARAMS,
                                     "area_index " + std::to_string(idx) + " out of range (have " +
                                         std::to_string(mow_areas.size()) + " mowing areas)");
     }
@@ -283,11 +284,11 @@ xbot_rpc::RpcProvider rpc_provider("mower_map_service", {{
     // values plus the (possibly unsaved) geometry, so the preview matches what
     // MowingBehavior would request for a real run without executing it.
     if (!params.is_object()) {
-      throw xbot_rpc::RpcException(xbot_rpc::RpcError::ERROR_INVALID_PARAMS,
+      throw xbot_mqtt::RpcException(xbot_mqtt::RpcError::ERROR_INVALID_PARAMS,
                                     "Expected by-name params {outline, ...}");
     }
     if (!params.contains("outline")) {
-      throw xbot_rpc::RpcException(xbot_rpc::RpcError::ERROR_INVALID_PARAMS, "Missing outline");
+      throw xbot_mqtt::RpcException(xbot_mqtt::RpcError::ERROR_INVALID_PARAMS, "Missing outline");
     }
 
     slic3r_coverage_planner::PlanPath srv;
@@ -308,7 +309,7 @@ xbot_rpc::RpcProvider rpc_provider("mower_map_service", {{
     srv.request.skip_fill = params.value("skip_fill", false);
 
     if (!slic3r_preview_client.call(srv)) {
-      throw xbot_rpc::RpcException(xbot_rpc::RpcError::ERROR_INTERNAL,
+      throw xbot_mqtt::RpcException(xbot_mqtt::RpcError::ERROR_INTERNAL,
                                     "Coverage planner call failed (is slic3r_coverage_planner running?)");
     }
 
