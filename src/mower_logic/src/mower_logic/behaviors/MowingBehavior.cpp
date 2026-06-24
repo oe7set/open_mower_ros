@@ -87,7 +87,7 @@ Behavior* MowingBehavior::execute() {
     if (finished) {
       // skip to next area if current
       ROS_INFO_STREAM("MowingBehavior: Executing mowing plan - finished");
-      currentMowingPaths.clear();
+      clearMowingPaths();
       if (!advance_to_next_area()) {
         // Explicit area queue fully mowed — we're done, dock.
         reset();
@@ -190,7 +190,7 @@ void MowingBehavior::consume_next_run() {
       if (!requestedAreaQueue.empty()) {
         currentMowingArea = requestedAreaQueue.front();
       }
-      currentMowingPaths.clear();
+      clearMowingPaths();
       currentMowingPath = 0;
       currentMowingPathIndex = 0;
       ROS_INFO_STREAM(
@@ -218,7 +218,7 @@ void MowingBehavior::consume_next_run() {
     requestedOutlineCount = -1;
     requestedRunId.clear();
     currentMowingArea = requested_area;
-    currentMowingPaths.clear();
+    clearMowingPaths();
     currentMowingPath = 0;
     currentMowingPathIndex = 0;
     ros::param::set("/mower_logic/next_area_index", -1);
@@ -344,7 +344,7 @@ void MowingBehavior::exit() {
 }
 
 void MowingBehavior::reset() {
-  currentMowingPaths.clear();
+  clearMowingPaths();
   currentMowingArea = 0;
   currentMowingPath = 0;
   currentMowingPathIndex = 0;
@@ -390,7 +390,7 @@ void MowingBehavior::update_actions() {
 bool MowingBehavior::create_mowing_plan(int area_index) {
   ROS_INFO_STREAM("MowingBehavior: Creating mowing plan for area: " << area_index);
   // Delete old plan and progress.
-  currentMowingPaths.clear();
+  clearMowingPaths();
 
   // get the mowing area
   mower_map::GetMowingAreaSrv mapSrv;
@@ -499,7 +499,12 @@ bool MowingBehavior::create_mowing_plan(int area_index) {
         {{"area_index", area_index}, {"requested_fill", fill_type}, {"run_id", requestedRunId}});
   }
 
-  currentMowingPaths = pathSrv.response.paths;
+  {
+    // Reassigning the vector reallocates it; lock against the UI thread's
+    // get_current_progress() iteration.
+    std::lock_guard<std::mutex> lk{mowing_paths_mutex_};
+    currentMowingPaths = pathSrv.response.paths;
+  }
 
   // Calculate mowing plan digest from the poses
   // TODO: move to slic3r_coverage_planner
@@ -656,7 +661,7 @@ bool MowingBehavior::execute_mowing_plan() {
             // remove all paths in current area and return true
             mowerEnabled = false;
             mbfClientExePath->cancelAllGoals();
-            currentMowingPaths.clear();
+            clearMowingPaths();
             skip_area = false;
             return true;
           }
@@ -771,7 +776,7 @@ bool MowingBehavior::execute_mowing_plan() {
             ROS_INFO_STREAM("MowingBehavior: (MOW) SKIP AREA was requested.");
             // remove all paths in current area and return true
             mowerEnabled = false;
-            currentMowingPaths.clear();
+            clearMowingPaths();
             skip_area = false;
             return true;
           }
@@ -903,6 +908,11 @@ uint8_t MowingBehavior::get_state() {
   return mower_msgs::HighLevelStatus::HIGH_LEVEL_STATE_AUTONOMOUS;
 }
 
+void MowingBehavior::clearMowingPaths() {
+  std::lock_guard<std::mutex> lk{mowing_paths_mutex_};
+  currentMowingPaths.clear();
+}
+
 int16_t MowingBehavior::get_current_area() {
   return currentMowingArea;
 }
@@ -916,6 +926,9 @@ int16_t MowingBehavior::get_current_path_index() {
 }
 
 float MowingBehavior::get_current_progress() {
+  // Runs on the UI timer thread; lock against structural changes to
+  // currentMowingPaths made by the mowing thread (see mowing_paths_mutex_).
+  std::lock_guard<std::mutex> lk{mowing_paths_mutex_};
   if (currentMowingPaths.empty()) {
     return 0.0f;
   }

@@ -15,6 +15,8 @@
 #ifndef SRC_MOWINGBEHAVIOR_H
 #define SRC_MOWINGBEHAVIOR_H
 
+#include <mutex>
+
 #include "Behavior.h"
 #include "UndockingBehavior.h"
 #include "ftc_local_planner/PlannerGetProgress.h"
@@ -88,6 +90,15 @@ class MowingBehavior : public Behavior {
   // Progress
   bool mowerEnabled = false;
   std::vector<slic3r_coverage_planner::Path> currentMowingPaths;
+  // Guards structural changes to currentMowingPaths (assignment / clear) against
+  // concurrent reads from get_current_progress(), which runs on the UI timer
+  // thread while the mowing thread mutates the plan. Without this a clear()/
+  // reassignment during the UI iteration can crash on a reallocated vector.
+  std::mutex mowing_paths_mutex_;
+
+  // Clears currentMowingPaths under mowing_paths_mutex_ so the UI thread's
+  // get_current_progress() never iterates a vector that is being cleared.
+  void clearMowingPaths();
 
   ros::Time last_checkpoint;
   int currentMowingPath;

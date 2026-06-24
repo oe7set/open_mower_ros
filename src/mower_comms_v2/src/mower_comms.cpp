@@ -143,8 +143,19 @@ int main(int argc, char** argv) {
   ros::Subscriber cmd_vel_sub = n.subscribe("ll/cmd_vel", 0, velReceived, ros::TransportHints().tcpNoDelay(true));
   ros::Subscriber rtcm_sub = n.subscribe("ll/position/gps/rtcm", 0, rtcmReceived);
   // ros::Subscriber high_level_status_sub = n.subscribe("/mower_logic/current_state", 0, highLevelStatusReceived);
-  ros::Timer publish_timer = n.createTimer(ros::Duration(0.5), sendEmergencyHeartbeatTimerTask);
-  ros::Timer publish_timer_2 = n.createTimer(ros::Duration(5.0), sendMowerEnabledTimerTask);
+  // Send the high-level emergency heartbeat at 5 Hz. The low-level firmware
+  // trips TIMEOUT_HIGH_LEVEL when no heartbeat arrives within its timeout
+  // window (see emergency_service.cpp). At the previous 2 Hz a single
+  // scheduling/network hiccup >1 s was enough to falsely trip the emergency
+  // stop; 5 Hz tolerates several consecutive missed heartbeats before the
+  // firmware reacts, while a genuine high-level death is still detected quickly.
+  ros::Timer publish_timer = n.createTimer(ros::Duration(0.2), sendEmergencyHeartbeatTimerTask);
+  // Refresh the latched mower-enabled state at 1 Hz. The firmware applies a
+  // duty timeout that zeroes the blade if no mower-enabled message arrives for
+  // a few seconds (see mower_service.cpp). Refreshing once per second lets that
+  // backstop be tightened to ~3 s (down from 10 s) without falsely stopping the
+  // blade mid-mow between refreshes.
+  ros::Timer publish_timer_2 = n.createTimer(ros::Duration(1.0), sendMowerEnabledTimerTask);
   action_pub = n.advertise<std_msgs::String>("xbot/action", 1);
   ros::Subscriber action_sub = n.subscribe("xbot/action", 0, actionReceived, ros::TransportHints().tcpNoDelay(true));
 

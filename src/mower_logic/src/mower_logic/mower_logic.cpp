@@ -88,7 +88,11 @@ mower_msgs::HighLevelStatus high_level_status;
 
 std::atomic<bool> mowerAllowed;
 
-Behavior* currentBehavior = &IdleBehavior::INSTANCE;
+// Written by the behavior execution loop, read by the safety/UI timers and the
+// command/joystick service callbacks (all on different threads). The pointees
+// are static singletons that never get destroyed, so the only hazard is a torn
+// read of the pointer itself; std::atomic makes every access well-defined.
+std::atomic<Behavior*> currentBehavior{&IdleBehavior::INSTANCE};
 
 std::vector<xbot_msgs::ActionInfo> rootActions;
 ros::Time last_v_battery_check;
@@ -192,7 +196,7 @@ void setRobotPose(geometry_msgs::Pose& pose) {
 // Abort the currently running behaviour
 void abortExecution() {
   if (currentBehavior != nullptr) {
-    currentBehavior->abort();
+    currentBehavior.load()->abort();
   }
 }
 
@@ -382,10 +386,10 @@ void updateUI(const ros::TimerEvent& timer_event) {
   }
 
   if (currentBehavior) {
-    high_level_status.state_name = currentBehavior->state_name();
-    high_level_status.state = (currentBehavior->get_state() & 0b11111) |
-                              (currentBehavior->get_sub_state() << mower_msgs::HighLevelStatus::SUBSTATE_SHIFT);
-    high_level_status.sub_state_name = currentBehavior->sub_state_name();
+    high_level_status.state_name = currentBehavior.load()->state_name();
+    high_level_status.state = (currentBehavior.load()->get_state() & 0b11111) |
+                              (currentBehavior.load()->get_sub_state() << mower_msgs::HighLevelStatus::SUBSTATE_SHIFT);
+    high_level_status.sub_state_name = currentBehavior.load()->sub_state_name();
   } else {
     high_level_status.state_name = "NULL";
     high_level_status.sub_state_name = "";
@@ -422,6 +426,15 @@ void checkSafety(const ros::TimerEvent& timer_event) {
   const auto power_time = power_state_subscriber.getMessageTime();
   const auto last_good_gps = getLastGoodGPS();
 
+  // Whether each safety-relevant topic has produced at least one message. Before
+  // the first message arrives the subscriber's message time is ros::Time(0),
+  // which would make every "now - message_time > timeout" check below true and
+  // latch a spurious emergency during startup (before the low-level board has
+  // connected). Gate the staleness checks on having actually received data.
+  const bool has_pose = pose_state_subscriber.hasMessage();
+  const bool has_status = status_state_subscriber.hasMessage();
+  const bool has_power = power_state_subscriber.hasMessage();
+
   high_level_status.emergency = last_emergency.latched_emergency;
   high_level_status.is_charging = last_power.charge_voltage > 10.0 || last_power.charge_voltage_adc > 10.0;
 
@@ -431,7 +444,7 @@ void checkSafety(const ros::TimerEvent& timer_event) {
   // send to idle if emergency and we're not recording
   if (currentBehavior != nullptr) {
     if (last_emergency.latched_emergency) {
-      currentBehavior->requestPause(pauseType::PAUSE_EMERGENCY);
+      currentBehavior.load()->requestPause(pauseType::PAUSE_EMERGENCY);
       if (currentBehavior == &AreaRecordingBehavior::INSTANCE || currentBehavior == &IdleBehavior::INSTANCE ||
           currentBehavior == &IdleBehavior::DOCKED_INSTANCE) {
         if (high_level_status.is_charging) {
@@ -441,14 +454,14 @@ void checkSafety(const ros::TimerEvent& timer_event) {
         }
       }
     } else {
-      currentBehavior->requestContinue(pauseType::PAUSE_EMERGENCY);
+      currentBehavior.load()->requestContinue(pauseType::PAUSE_EMERGENCY);
     }
   }
 
   // TODO: Have a single point where we check for this timeout instead of twice (here and in the behavior)
   // check if odometry is current. If not, the GPS was bad so we stop moving.
   // Note that the mowing behavior will pause as well by itself.
-  if (ros::Time::now() - pose_time > ros::Duration(1.0)) {
+  if (has_pose && ros::Time::now() - pose_time > ros::Duration(1.0)) {
     stopBlade();
     stopMoving();
     ROS_WARN_STREAM_THROTTLE(
@@ -457,8 +470,11 @@ void checkSafety(const ros::TimerEvent& timer_event) {
   }
 
   // check if status is current. if not, we have a problem since it contains wheel ticks and so on.
-  // Since these should never drop out, we enter emergency instead of "only" stopping
-  if (ros::Time::now() - status_time > ros::Duration(3) || ros::Time::now() - power_time > ros::Duration(3)) {
+  // Since these should never drop out, we enter emergency instead of "only" stopping.
+  // Only evaluate once each topic has produced data, so we don't latch a spurious
+  // emergency at startup before the low-level board has connected.
+  if ((has_status && ros::Time::now() - status_time > ros::Duration(3)) ||
+      (has_power && ros::Time::now() - power_time > ros::Duration(3))) {
     setEmergencyMode(true);
     ROS_WARN_STREAM_THROTTLE(
         5, "om_mower_logic: EMERGENCY /mower/status values stopped. dt was: " << (ros::Time::now() - status_time));
@@ -466,8 +482,13 @@ void checkSafety(const ros::TimerEvent& timer_event) {
   }
 
   // If the motor controllers error, we enter emergency mode in the hope to save them. They should not error.
-  if (last_left_esc_state.status <= mower_msgs::ESCStatus::ESC_STATUS_ERROR ||
-      last_right_esc_state.status <= mower_msgs::ESCStatus::ESC_STATUS_ERROR) {
+  // Only evaluate once both ESC status topics have produced data: a default-
+  // constructed ESCStatus has status == 0, which is <= ESC_STATUS_ERROR and
+  // would latch a spurious emergency at startup before the ESCs report in.
+  const bool has_left_esc = left_esc_status_state_subscriber.hasMessage();
+  const bool has_right_esc = right_esc_status_state_subscriber.hasMessage();
+  if ((has_left_esc && last_left_esc_state.status <= mower_msgs::ESCStatus::ESC_STATUS_ERROR) ||
+      (has_right_esc && last_right_esc_state.status <= mower_msgs::ESCStatus::ESC_STATUS_ERROR)) {
     setEmergencyMode(true);
     ROS_ERROR_STREAM("EMERGENCY: at least one motor control errored. errors left: "
                      << (last_left_esc_state.status) << ", status right: " << last_right_esc_state.status);
@@ -480,7 +501,7 @@ void checkSafety(const ros::TimerEvent& timer_event) {
     setLastGoodGPS(ros::Time::now());
     high_level_status.gps_quality_percent =
         1.0 - fmin(1.0, last_pose.position_accuracy / last_config.max_position_accuracy);
-    if (currentBehavior->needs_gps()) {
+    if (currentBehavior.load()->needs_gps()) {
       ROS_INFO_STREAM_THROTTLE(10, "GPS quality: " << high_level_status.gps_quality_percent);
     }
   } else {
@@ -490,7 +511,7 @@ void checkSafety(const ros::TimerEvent& timer_event) {
       // set this if we don't even have an orientation
       high_level_status.gps_quality_percent = -1;
     }
-    if (currentBehavior->needs_gps()) {
+    if (currentBehavior.load()->needs_gps()) {
       ROS_WARN_STREAM_THROTTLE(1, "Low quality GPS");
     }
   }
@@ -500,13 +521,13 @@ void checkSafety(const ros::TimerEvent& timer_event) {
   if (gpsTimeout) {
     // GPS = bad, set quality to 0
     high_level_status.gps_quality_percent = 0;
-    if (currentBehavior->needs_gps()) {
+    if (currentBehavior.load()->needs_gps()) {
       ROS_WARN_STREAM_THROTTLE(1, "GPS timeout");
     }
   }
 
-  if (currentBehavior != nullptr && currentBehavior->needs_gps()) {
-    currentBehavior->setGoodGPS(!gpsTimeout);
+  if (currentBehavior != nullptr && currentBehavior.load()->needs_gps()) {
+    currentBehavior.load()->setGoodGPS(!gpsTimeout);
     // Stop the mower
     if (gpsTimeout) {
       stopBlade();
@@ -515,14 +536,14 @@ void checkSafety(const ros::TimerEvent& timer_event) {
     }
   }
 
-  if (currentBehavior != nullptr && currentBehavior->redirect_joystick()) {
+  if (currentBehavior != nullptr && currentBehavior.load()->redirect_joystick()) {
     if (ros::Time::now() - joy_vel_time > ros::Duration(10)) {
       stopMoving();  // To avoid cmd_vel receive timeout in mower_comms
     }
   }
 
   // enable the mower (if not aleady) if mowerAllowed is still true after checks and bahavior agrees
-  setMowerEnabled(currentBehavior != nullptr && mowerAllowed && currentBehavior->mower_enabled());
+  setMowerEnabled(currentBehavior != nullptr && mowerAllowed && currentBehavior.load()->mower_enabled());
 
   // Get BMS voltage if available, otherwise use ADC or charger voltage
   const auto last_bms = bms_state_subscriber.getMessage();
@@ -594,9 +615,14 @@ void checkSafety(const ros::TimerEvent& timer_event) {
   // "docking needed" reason (low battery, rain, manual pause, hot motor) must not abort
   // it - otherwise the safety timer keeps kicking the user back to idle, making the mode
   // impossible to enter. Treated like idle, which is already exempt above.
+  // Also exempt normal undocking (UndockingBehavior::INSTANCE), not just the
+  // retry variant: aborting mid-undock can leave the mower half-on-dock. Both
+  // undocking paths are short and transition into a state (mowing/idle) where
+  // the docking-needed reason is re-evaluated, so deferring the abort is safe.
   if (dockingNeeded && currentBehavior != &DockingBehavior::INSTANCE &&
-      currentBehavior != &UndockingBehavior::RETRY_INSTANCE && currentBehavior != &IdleBehavior::INSTANCE &&
-      currentBehavior != &IdleBehavior::DOCKED_INSTANCE && currentBehavior != &AreaRecordingBehavior::INSTANCE) {
+      currentBehavior != &UndockingBehavior::INSTANCE && currentBehavior != &UndockingBehavior::RETRY_INSTANCE &&
+      currentBehavior != &IdleBehavior::INSTANCE && currentBehavior != &IdleBehavior::DOCKED_INSTANCE &&
+      currentBehavior != &AreaRecordingBehavior::INSTANCE) {
     ROS_INFO_STREAM(dockingReason.rdbuf());
     abortExecution();
   }
@@ -604,6 +630,10 @@ void checkSafety(const ros::TimerEvent& timer_event) {
 
 void reconfigureCB(mower_logic::MowerLogicConfig& c, uint32_t level) {
   ROS_INFO_STREAM("om_mower_logic: Setting mower_logic config");
+  // Guard the write with the same mutex that getConfig()/setConfig() use. This
+  // callback runs on the dynamic_reconfigure thread, concurrently with the
+  // control loop and timer callbacks that read last_config via getConfig().
+  std::lock_guard<std::recursive_mutex> lk{mower_logic_mutex};
   last_config = c;
 }
 
@@ -612,25 +642,25 @@ bool highLevelCommand(mower_msgs::HighLevelControlSrvRequest& req, mower_msgs::H
     case mower_msgs::HighLevelControlSrvRequest::COMMAND_HOME:
       ROS_INFO_STREAM("COMMAND_HOME");
       if (currentBehavior) {
-        currentBehavior->command_home();
+        currentBehavior.load()->command_home();
       }
       break;
     case mower_msgs::HighLevelControlSrvRequest::COMMAND_START:
       ROS_INFO_STREAM("COMMAND_START");
       if (currentBehavior) {
-        currentBehavior->command_start();
+        currentBehavior.load()->command_start();
       }
       break;
     case mower_msgs::HighLevelControlSrvRequest::COMMAND_S1:
       ROS_INFO_STREAM("COMMAND_S1");
       if (currentBehavior) {
-        currentBehavior->command_s1();
+        currentBehavior.load()->command_s1();
       }
       break;
     case mower_msgs::HighLevelControlSrvRequest::COMMAND_S2:
       ROS_INFO_STREAM("COMMAND_S2");
       if (currentBehavior) {
-        currentBehavior->command_s2();
+        currentBehavior.load()->command_s2();
       }
       break;
     case mower_msgs::HighLevelControlSrvRequest::COMMAND_DELETE_MAPS: {
@@ -646,7 +676,7 @@ bool highLevelCommand(mower_msgs::HighLevelControlSrvRequest& req, mower_msgs::H
 
       // Abort the current behavior. Idle will refresh and go to AreaRecorder, AreaRecorder will to to Idle wich will go
       // to a fresh AreaRecorder
-      currentBehavior->abort();
+      currentBehavior.load()->abort();
     } break;
     case mower_msgs::HighLevelControlSrvRequest::COMMAND_RESET_EMERGENCY:
       ROS_WARN_STREAM("COMMAND_RESET_EMERGENCY");
@@ -674,13 +704,13 @@ void actionReceived(const std_msgs::String::ConstPtr& action) {
   }
 
   if (currentBehavior) {
-    currentBehavior->handle_action(action->data);
+    currentBehavior.load()->handle_action(action->data);
   }
 }
 
 void joyVelReceived(const geometry_msgs::Twist::ConstPtr& joy_vel) {
   joy_vel_time = ros::Time::now();
-  if (currentBehavior && currentBehavior->redirect_joystick()) {
+  if (currentBehavior && currentBehavior.load()->redirect_joystick()) {
     cmd_vel_pub.publish(joy_vel);
   }
 }
@@ -954,9 +984,9 @@ int main(int argc, char** argv) {
   // Behavior execution loop
   while (ros::ok()) {
     if (currentBehavior != nullptr) {
-      currentBehavior->start(last_config, shared_state);
-      Behavior* newBehavior = currentBehavior->execute();
-      currentBehavior->exit();
+      currentBehavior.load()->start(last_config, shared_state);
+      Behavior* newBehavior = currentBehavior.load()->execute();
+      currentBehavior.load()->exit();
       currentBehavior = newBehavior;
     } else {
       high_level_status.state_name = "NULL";
