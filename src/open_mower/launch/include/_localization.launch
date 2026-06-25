@@ -4,5 +4,11 @@
         <remap from="~twist_in" to="/ll/diff_drive/measured_twist"/>
         <remap from="~xb_pose_in" to="/ll/position/gps"/>
         <remap from="~xb_pose_out" to="xbot_positioning/xb_pose"/>
+        <!-- Publish the kalman_state debug topic (x/y/theta/vx/vr) when
+             OM_POSITIONING_DEBUG=true. Set here on the node itself so it is in
+             place before the node reads it at startup; _params.launch is
+             included after _localization, so its xbot_positioning/debug param
+             would otherwise arrive too late and kalman_state would never start. -->
+        <param name="debug" value="$(optenv OM_POSITIONING_DEBUG false)"/>
     </node>
 </launch>

@@ -56,7 +56,10 @@ DEFAULT_PATH = os.environ.get("TELEMETRY_PATH", "/data/ros/openmower/telemetry")
 
 STATE_TOPIC = "xbot_monitoring/robot_state"
 HIGH_LEVEL_TOPIC = "mower_logic/current_state"
-IMU_TOPIC = "imu"
+# Madgwick-filtered IMU (imu_orientation_filter publishes imu/data with a
+# usable orientation quaternion + gyro/accel). The bare "imu" topic does not
+# exist, which silently left every IMU field at zero.
+IMU_TOPIC = "imu/data"
 SENSOR_DATA_TEMPLATE = "xbot_monitoring/sensors/{sid}/data"
 # Raw, unfiltered GPS pose (antenna position + GPS-derived headings) and the
 # raw EKF state. Only recorded when the localisation-debug mode is on; used to
@@ -439,6 +442,15 @@ class TelemetryRecorder:
         if rs is not None:
             sample["x"] = float(rs.robot_pose.pose.pose.position.x)
             sample["y"] = float(rs.robot_pose.pose.pose.position.y)
+            # Fused heading (theta) straight from the EKF pose carried in
+            # RobotState — available on every recording without the debug topic.
+            # This is the robust source for the localisation analysis (raw GPS
+            # antenna vs fused centre rotated by theta).
+            q = rs.robot_pose.pose.pose.orientation
+            sample["fused_theta"] = math.atan2(
+                2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+            sample["fused_heading"] = float(rs.robot_pose.vehicle_heading)
+            sample["fused_heading_valid"] = bool(rs.robot_pose.orientation_valid)
             sample["gps_fix_type"] = int(rs.gps_fix_type)
             sample["gps_satellite_count"] = int(rs.gps_satellite_count)
             sample["gps_pdop"] = float(rs.gps_pdop)
