@@ -3,6 +3,8 @@
 // Copyright (c) 2022 Clemens Elflein. All rights reserved.
 //
 
+#include <algorithm>
+
 #include <geometry_msgs/TwistStamped.h>
 #include <nav_msgs/Odometry.h>
 #include <sensor_msgs/Imu.h>
@@ -56,6 +58,28 @@ double min_speed = 0.0;
 
 // Max position accuracy to allow for GPS updates
 double max_gps_accuracy;
+
+// GPS position measurement covariance handling. Historically a fixed 500 was
+// used, which weights the RTK position so weakly that the antenna-offset
+// correction (carried by the GPS measurement model) barely moves the fused
+// state — the antenna offset then has almost no effect and adjacent passes are
+// laterally shifted. We instead derive the covariance from the receiver's
+// reported position_accuracy (variance = accuracy^2), clamped to a sane floor
+// so RTK-Float/multipath spikes can't make the filter twitch.
+//
+// DEFAULT OFF: field data shows the antenna offset also has an unresolved
+// left/right sign inversion (raw GPS geometry reports the antenna on the
+// opposite side of where it is physically mounted). Enabling stronger GPS
+// weighting before that sign is confirmed would make the lateral offset error
+// WORSE, not better. Keep this opt-in (~use_accuracy_covariance) until the
+// sign is nailed down on the device.
+bool use_accuracy_covariance = false;
+// Lower bound on the std-dev (m) used for the covariance, so a single
+// optimistic accuracy report can't over-trust one fix. 0.05 m keeps the offset
+// fully effective while staying smooth.
+double min_gps_covariance_stddev = 0.05;
+// Legacy fixed covariance, used when use_accuracy_covariance is false.
+double fixed_gps_covariance = 500.0;
 
 // True, if we should publish debug topics (expected motion vector and kalman state)
 bool publish_debug;
@@ -302,8 +326,17 @@ void onPose(const xbot_msgs::AbsolutePose::ConstPtr &msg) {
 
             has_gps = true;
         } else if (has_gps) {
-            // gps was valid before, we apply the filter
-            core.updatePosition(msg->pose.pose.position.x, msg->pose.pose.position.y, 500.0);
+            // gps was valid before, we apply the filter. Derive the measurement
+            // covariance from the receiver-reported accuracy (variance =
+            // max(accuracy, floor)^2) so the RTK position — and with it the
+            // antenna-offset correction — actually moves the fused state,
+            // instead of the legacy fixed 500 that all but ignored it.
+            double gps_cov = fixed_gps_covariance;
+            if (use_accuracy_covariance) {
+                double stddev = std::max(static_cast<double>(msg->position_accuracy), min_gps_covariance_stddev);
+                gps_cov = stddev * stddev;
+            }
+            core.updatePosition(msg->pose.pose.position.x, msg->pose.pose.position.y, gps_cov);
             if (publish_debug) {
                 auto m = core.om2.h(core.ekf.getState());
                 geometry_msgs::Vector3 dbg;
@@ -365,6 +398,9 @@ int main(int argc, char **argv) {
     paramNh.param("min_speed", min_speed, 0.01);
     paramNh.param("max_gps_accuracy", max_gps_accuracy, 0.1);
     paramNh.param("use_gps_heading", use_gps_heading, false);
+    paramNh.param("use_accuracy_covariance", use_accuracy_covariance, false);
+    paramNh.param("min_gps_covariance_stddev", min_gps_covariance_stddev, 0.05);
+    paramNh.param("fixed_gps_covariance", fixed_gps_covariance, 500.0);
     paramNh.param("debug", publish_debug, false);
     paramNh.param("antenna_offset_x", antenna_offset_x, 0.0);
     paramNh.param("antenna_offset_y", antenna_offset_y, 0.0);
