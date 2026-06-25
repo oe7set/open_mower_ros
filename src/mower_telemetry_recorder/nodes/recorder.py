@@ -68,12 +68,19 @@ KALMAN_STATE_TOPIC = "xbot_positioning/kalman_state"
 NODE_ID = "mower_telemetry_recorder"
 RPC_METHODS = ("telemetry.list_sessions", "telemetry.get_session")
 
-# Active mowing-state names that gate sample recording.
+# Mowing-state names that gate a mow session by state transition.
 ACTIVE_STATES = {"MOWING", "PAUSED"}
 
-# Extra state names recorded only in localisation-debug mode (record_all_states),
-# so a diagnosis run can be captured while driving manually / recording an area.
-DEBUG_EXTRA_STATES = {"AREA_RECORDING", "IDLE"}
+# Manual driving has no dedicated high-level state (the joystick is only routed
+# in AREA_RECORDING, and app teleop bypasses the FSM via twist_mux), so manual
+# sessions are gated by actual MOVEMENT instead of by state. Such a session
+# auto-closes after this long without movement, or immediately when the
+# AREA_RECORDING mode is left — only a closed session lands in the index and
+# shows up in the heatmap.
+MANUAL_IDLE_TIMEOUT_S = 30.0
+# Per-tick displacement (m) above which the mower counts as moving (≈0.12 m/s at
+# 4 Hz). Opens / keeps alive a manual movement session.
+MOVE_EPS_M = 0.03
 
 # 4 Hz sampling — matches the App's heatmap zoom budget at sane file sizes
 # (a 30 min mow ≈ 7200 samples ≈ 2 MB JSONL).
@@ -218,18 +225,28 @@ class TelemetryRecorder:
     def __init__(self, store: TelemetryStore, sensor_ids: list[str], record_all_states: bool = False):
         self.store = store
         self.sensor_ids = sensor_ids
-        # In localisation-debug mode also record while driving manually / area
-        # recording, and fold the raw GPS + EKF debug fields into each sample.
+        # record_all_states only controls whether the raw GPS + EKF debug fields
+        # are folded into each sample; it no longer gates session opening (manual
+        # sessions are movement-gated, see _update_manual_session_unlocked).
         self.record_all_states = record_all_states
-        self.active_states = ACTIVE_STATES | DEBUG_EXTRA_STATES if record_all_states else ACTIVE_STATES
         self._lock = threading.Lock()
         self._last_state: Optional[str] = None
 
-        # Active session state. None when not recording.
+        # Active session state. None when not recording. A session is either a
+        # "mow" session (opened/closed by the MOWING/PAUSED state transition) or
+        # a "manual" session (opened by movement, closed on idle timeout or when
+        # AREA_RECORDING is left). _manual_session distinguishes the two so the
+        # state-transition path never closes a movement session and vice versa.
         self._session_id: Optional[str] = None
         self._session_start_ts: Optional[float] = None
         self._session_file = None  # type: Optional[Any]
         self._sample_count: int = 0
+        self._manual_session: bool = False
+        # ts of the last detected movement, for the manual-session idle timeout.
+        self._last_move_ts: Optional[float] = None
+        # Reference pose for per-interval movement detection (manual sessions).
+        self._move_ref_x: Optional[float] = None
+        self._move_ref_y: Optional[float] = None
 
         # Latest values cached from subscribers; folded into each sample tick.
         self._robot_state: Optional[RobotState] = None
@@ -263,14 +280,27 @@ class TelemetryRecorder:
     def on_high_level(self, msg: HighLevelStatus) -> None:
         state_name = msg.state_name or ""
         with self._lock:
-            entered_active = state_name in self.active_states and self._last_state not in self.active_states
-            left_active = state_name not in self.active_states and self._last_state in self.active_states
+            prev_state = self._last_state
+            entered_active = state_name in ACTIVE_STATES and prev_state not in ACTIVE_STATES
+            left_active = state_name not in ACTIVE_STATES and prev_state in ACTIVE_STATES
             self._last_state = state_name
 
-            if entered_active and self._session_id is None:
-                self._open_session()
-            elif left_active and self._session_id is not None:
+            # Mow session: opened/closed by the MOWING/PAUSED state transition.
+            # Takes precedence over a manual session (entering MOWING closes any
+            # open movement session first so the two never overlap).
+            if entered_active:
+                if self._session_id is not None and self._manual_session:
+                    self._close_session()
+                if self._session_id is None:
+                    self._open_session(manual=False)
+            elif left_active and self._session_id is not None and not self._manual_session:
                 self._close_session()
+
+            # Leaving AREA_RECORDING ends a manual session right away (rather than
+            # waiting for the idle timeout), so it lands in the heatmap promptly.
+            if prev_state == "AREA_RECORDING" and state_name != "AREA_RECORDING":
+                if self._session_id is not None and self._manual_session:
+                    self._close_session()
 
     def on_robot_state(self, msg: RobotState) -> None:
         with self._lock:
@@ -320,9 +350,10 @@ class TelemetryRecorder:
     # ----- tick / IO -------------------------------------------------------
 
     def tick(self) -> None:
-        """Called from the main loop at SAMPLE_HZ; writes one JSONL line when
-        movement-gating allows it."""
+        """Called from the main loop at SAMPLE_HZ; manages movement-gated manual
+        sessions, then writes one JSONL line when movement-gating allows it."""
         with self._lock:
+            self._update_manual_session_unlocked()
             if self._session_id is None or self._session_file is None:
                 return
             sample = self._build_sample_unlocked()
@@ -338,6 +369,50 @@ class TelemetryRecorder:
                 self._last_written_state = sample.get("state")
             except OSError as e:
                 rospy.logerr("telemetry write failed: %s", e)
+
+    def _current_pose_unlocked(self) -> tuple[Optional[float], Optional[float]]:
+        rs = self._robot_state
+        if rs is None:
+            return None, None
+        return float(rs.robot_pose.pose.pose.position.x), float(rs.robot_pose.pose.pose.position.y)
+
+    def _update_manual_session_unlocked(self) -> None:
+        """Open/close a movement-gated manual session. Manual driving has no
+        dedicated high-level state, so we key off actual pose movement: while not
+        mowing, real movement opens a session; it auto-closes after
+        MANUAL_IDLE_TIMEOUT_S without movement. Leaving AREA_RECORDING closes it
+        immediately (handled in on_high_level)."""
+        # Never interfere with a state-driven mow session.
+        if self._last_state in ACTIVE_STATES:
+            return
+        if self._session_id is not None and not self._manual_session:
+            return
+
+        now = time.time()
+        x, y = self._current_pose_unlocked()
+        moved = (
+            x is not None
+            and y is not None
+            and self._move_ref_x is not None
+            and self._move_ref_y is not None
+            and math.hypot(x - self._move_ref_x, y - self._move_ref_y) >= MOVE_EPS_M
+        )
+        if moved or self._move_ref_x is None:
+            # Advance the reference point whenever we move (or on first pose) so
+            # MOVE_EPS_M is a per-interval displacement, not cumulative drift.
+            self._move_ref_x, self._move_ref_y = x, y
+        if moved:
+            self._last_move_ts = now
+
+        if self._session_id is None:
+            # Open a manual session on the first detected movement.
+            if moved:
+                self._open_session(manual=True)
+                self._last_move_ts = now
+        elif self._manual_session:
+            # Close it once movement has stopped for the idle timeout.
+            if self._last_move_ts is not None and (now - self._last_move_ts) >= MANUAL_IDLE_TIMEOUT_S:
+                self._close_session()
 
     def _should_write_unlocked(self, sample: dict) -> bool:
         """Movement-gate: always write the first sample, on a state change, or
@@ -420,7 +495,7 @@ class TelemetryRecorder:
             sample["gps_dx"] = sample["raw_gps_x"] - sample["ekf_x"]
             sample["gps_dy"] = sample["raw_gps_y"] - sample["ekf_y"]
 
-    def _open_session(self) -> None:
+    def _open_session(self, manual: bool = False) -> None:
         sid = secrets.token_hex(8)
         path = os.path.join(self.store.root, sid + ".jsonl")
         try:
@@ -433,12 +508,14 @@ class TelemetryRecorder:
         self._session_id = sid
         self._session_start_ts = time.time()
         self._sample_count = 0
+        self._manual_session = manual
         # Reset movement-gating so the first tick of the new session is written.
         self._last_written_x = None
         self._last_written_y = None
         self._last_written_ts = None
         self._last_written_state = None
-        rospy.loginfo("telemetry: opened session %s at %s", sid, path)
+        rospy.loginfo("telemetry: opened %s session %s at %s",
+                      "manual" if manual else "mow", sid, path)
 
     def _close_session(self) -> None:
         sid = self._session_id
@@ -451,6 +528,9 @@ class TelemetryRecorder:
         self._session_start_ts = None
         self._session_file = None
         self._sample_count = 0
+        was_manual = self._manual_session
+        self._manual_session = False
+        self._last_move_ts = None
         if sid is None or f is None or start_ts is None:
             return
         try:
@@ -470,10 +550,11 @@ class TelemetryRecorder:
             "duration_s": round(end_ts - start_ts, 1),
             "sample_count": sample_count,
             "file_size_bytes": file_size,
+            "manual": was_manual,
         }
         self.store.add_session(entry)
-        rospy.loginfo("telemetry: closed session %s samples=%d size=%d duration=%.1fs",
-                      sid, sample_count, file_size, entry["duration_s"])
+        rospy.loginfo("telemetry: closed %s session %s samples=%d size=%d duration=%.1fs",
+                      "manual" if was_manual else "mow", sid, sample_count, file_size, entry["duration_s"])
 
 
 class TelemetryRpcServer:
