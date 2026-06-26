@@ -49,6 +49,9 @@ namespace xbot {
             void setState(double px, double py, double theta, double vx, double vr);
             const Kalman::Covariance<StateT> &getCovariance();
             void setAntennaOffset(double offset_x, double offset_y);
+            // Explicit isotropic process noise (Q = q * I). q <= 0 leaves the
+            // system model's default untouched (legacy behaviour).
+            void setProcessNoise(double q);
 
         public:
             Kalman::ExtendedKalmanFilter<StateT> ekf{};

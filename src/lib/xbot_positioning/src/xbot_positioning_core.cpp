@@ -100,3 +100,17 @@ void xbot::positioning::xbot_positioning_core::setAntennaOffset(double offset_x,
     pm.antenna_offset_y = om2.antenna_offset_y = offset_y;
 }
 
+void xbot::positioning::xbot_positioning_core::setProcessNoise(double q) {
+    // q <= 0: keep the system model's default process noise (legacy behaviour,
+    // exactly as before this parameter existed). Otherwise set Q = q * I, which
+    // bounds how fast the state may drift between measurements and smooths the
+    // response to low-rate (1 Hz) GPS updates.
+    if (q <= 0.0) {
+        return;
+    }
+    Kalman::Covariance<StateT> c;
+    c.setIdentity();
+    c *= q;
+    sys.setCovariance(c);
+}
+

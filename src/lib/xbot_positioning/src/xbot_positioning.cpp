@@ -63,23 +63,31 @@ double max_gps_accuracy;
 // used, which weights the RTK position so weakly that the antenna-offset
 // correction (carried by the GPS measurement model) barely moves the fused
 // state — the antenna offset then has almost no effect and adjacent passes are
-// laterally shifted. We instead derive the covariance from the receiver's
-// reported position_accuracy (variance = accuracy^2), clamped to a sane floor
-// so RTK-Float/multipath spikes can't make the filter twitch.
+// laterally shifted. When enabled we derive the covariance from the receiver's
+// reported position_accuracy (variance = accuracy^2), clamped to a floor.
 //
-// DEFAULT OFF: field data shows the antenna offset also has an unresolved
-// left/right sign inversion (raw GPS geometry reports the antenna on the
-// opposite side of where it is physically mounted). Enabling stronger GPS
-// weighting before that sign is confirmed would make the lateral offset error
-// WORSE, not better. Keep this opt-in (~use_accuracy_covariance) until the
-// sign is nailed down on the device.
+// The floor matters a lot at low GPS rates: the position arrives at ~1 Hz while
+// predict runs at IMU rate, so the state dead-reckons ahead between fixes. Too
+// small a floor makes every fix yank the state back hard → a ~1 Hz sawtooth /
+// jerk. A larger floor (here 0.15 m) lets the offset converge over several
+// fixes while keeping any single 1 Hz update gentle. Combined with the correct
+// PositionMeasurementModel Jacobian (which now models the antenna's arc during
+// turns), this keeps both straights smooth and turns stable.
+//
+// DEFAULT OFF: enable per-device (~use_accuracy_covariance) and verify on the
+// machine before making it the default — it changes the core localisation
+// filter that all navigation depends on.
 bool use_accuracy_covariance = false;
-// Lower bound on the std-dev (m) used for the covariance, so a single
-// optimistic accuracy report can't over-trust one fix. 0.05 m keeps the offset
-// fully effective while staying smooth.
-double min_gps_covariance_stddev = 0.05;
+// Lower bound on the std-dev (m) used for the covariance. 0.15 m ≈ realistic
+// effective RTK position noise at 1 Hz once latency is accounted for; keeps the
+// 1 Hz update gentle (no sawtooth) while the offset still converges.
+double min_gps_covariance_stddev = 0.15;
 // Legacy fixed covariance, used when use_accuracy_covariance is false.
 double fixed_gps_covariance = 500.0;
+// Isotropic process noise Q = q * I. <= 0 keeps the system model default
+// (legacy behaviour). A small positive value bounds state drift between the
+// 1 Hz GPS fixes and smooths the filter response.
+double process_noise = 0.0;
 
 // True, if we should publish debug topics (expected motion vector and kalman state)
 bool publish_debug;
@@ -399,13 +407,15 @@ int main(int argc, char **argv) {
     paramNh.param("max_gps_accuracy", max_gps_accuracy, 0.1);
     paramNh.param("use_gps_heading", use_gps_heading, false);
     paramNh.param("use_accuracy_covariance", use_accuracy_covariance, false);
-    paramNh.param("min_gps_covariance_stddev", min_gps_covariance_stddev, 0.05);
+    paramNh.param("min_gps_covariance_stddev", min_gps_covariance_stddev, 0.15);
     paramNh.param("fixed_gps_covariance", fixed_gps_covariance, 500.0);
     paramNh.param("debug", publish_debug, false);
     paramNh.param("antenna_offset_x", antenna_offset_x, 0.0);
     paramNh.param("antenna_offset_y", antenna_offset_y, 0.0);
+    paramNh.param("process_noise", process_noise, 0.0);
 
     core.setAntennaOffset(antenna_offset_x, antenna_offset_y);
+    core.setProcessNoise(process_noise);
 
     ROS_INFO_STREAM("Antenna offset: " << antenna_offset_x << ", " << antenna_offset_y);
 

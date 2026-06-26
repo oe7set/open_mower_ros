@@ -115,7 +115,20 @@ protected:
      */
     void updateJacobians( const S& x )
     {
-      this->H.setIdentity();
+      // h(x) maps the robot centre to the GPS antenna position:
+      //   antenna_x = x + cos(theta)*off_x - sin(theta)*off_y
+      //   antenna_y = y + sin(theta)*off_x + cos(theta)*off_y
+      // This is non-linear in theta, so H must carry the d/dtheta terms.
+      // Leaving H at identity (the old behaviour) makes the filter treat the
+      // antenna's arc motion during a turn as a position error, which — once the
+      // GPS update is weighted strongly — yanks the state and ruins turns. With
+      // a zero offset these extra terms vanish and H reduces to identity, so
+      // setups without an antenna offset are unaffected.
+      this->H.setZero();
+      this->H(M::X, S::X) = 1;
+      this->H(M::Y, S::Y) = 1;
+      this->H(M::X, S::THETA) = -std::sin(x.theta()) * antenna_offset_x - std::cos(x.theta()) * antenna_offset_y;
+      this->H(M::Y, S::THETA) = std::cos(x.theta()) * antenna_offset_x - std::sin(x.theta()) * antenna_offset_y;
     }
 };
 
